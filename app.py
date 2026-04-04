@@ -295,11 +295,11 @@ def _render_food_list(food_entries):
         qty = f" x{entry.quantity}" if float(entry.quantity or 1) != 1.0 else ""
         time_str = entry.consumed_at.strftime("%-I:%M %p") if entry.consumed_at else ""
         cal = int(float(item.calories or 0) * float(entry.quantity or 1))
-        rows += f"""<div class="entry-item">
+        rows += f"""<a href="/edit/{entry.id}" class="entry-item" style="display:block; text-decoration:none; color:inherit;">
             <strong>{item.name}</strong>{qty}
             <span style="float:right">{cal} kcal</span><br>
-            <span class="entry-meta">{entry.meal_slot} &middot; {time_str}</span>
-        </div>"""
+            <span class="entry-meta">{entry.meal_slot} &middot; {time_str} &middot; <span style="color:#2563eb;">tap to edit</span></span>
+        </a>"""
     return rows
 
 
@@ -763,6 +763,165 @@ def history():
             {_render_symptom_list(symptoms)}
         </div>"""
         return page("History", body)
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Routes: Edit / Delete food entry
+# ---------------------------------------------------------------------------
+@app.route("/edit/<int:entry_id>", methods=["GET"])
+@login_required
+def edit_food(entry_id):
+    db = get_session()
+    try:
+        entry = db.query(FoodEntry).get(entry_id)
+        if not entry:
+            return redirect(url_for("home"))
+        item = db.query(FoodItem).get(entry.food_item_id)
+        tags = db.query(FoodTag).filter(FoodTag.food_item_id == item.id).all()
+        tags_str = ", ".join(t.tag for t in tags)
+
+        nutrient_inputs = ""
+        for field_name, display, unit in NUTRIENT_FIELDS:
+            val = getattr(item, field_name, "") or ""
+            nutrient_inputs += f"""<div class="field">
+                <label for="{field_name}">{display} ({unit})</label>
+                <input type="number" step="any" id="{field_name}" name="{field_name}"
+                       value="{val}" inputmode="decimal">
+            </div>"""
+
+        meal_options = ""
+        for slot in MEAL_SLOTS:
+            selected = "selected" if slot == entry.meal_slot else ""
+            meal_options += f"""<div class="meal-option {selected}" onclick="selectMeal(this, '{slot}')">
+                {slot.replace('-', ' ').title()}
+            </div>"""
+
+        consumed_str = entry.consumed_at.strftime("%Y-%m-%dT%H:%M") if entry.consumed_at else ""
+
+        body = f"""
+        <a class="back-link" href="/home">&larr; Home</a>
+        <div class="card">
+            <h2>Edit Entry</h2>
+            <form method="post" action="/edit/{entry.id}">
+                <div class="field">
+                    <label for="name">Food Name</label>
+                    <input type="text" id="name" name="name" value="{item.name}" required>
+                </div>
+                <div class="field">
+                    <label for="brand">Brand</label>
+                    <input type="text" id="brand" name="brand" value="{item.brand or ''}">
+                </div>
+                <div class="field">
+                    <label>Meal</label>
+                    <div class="meal-grid">{meal_options}</div>
+                    <input type="hidden" name="meal_slot" id="meal_slot" value="{entry.meal_slot}">
+                </div>
+                <div class="field">
+                    <label for="quantity">Quantity (servings)</label>
+                    <input type="number" step="any" id="quantity" name="quantity"
+                           value="{entry.quantity}" min="0.1" inputmode="decimal">
+                </div>
+                <div class="field">
+                    <label for="consumed_at">When did you eat this?</label>
+                    <input type="datetime-local" id="consumed_at" name="consumed_at"
+                           value="{consumed_str}">
+                </div>
+
+                <h3>Nutrients (per serving)</h3>
+                <div class="nutrient-grid">{nutrient_inputs}</div>
+
+                <div class="field" style="margin-top: 12px;">
+                    <label for="tags">Tags (comma-separated)</label>
+                    <input type="text" id="tags" name="tags" value="{tags_str}">
+                </div>
+                <div class="field">
+                    <label for="notes">Notes (optional)</label>
+                    <textarea id="notes" name="notes">{entry.notes or ''}</textarea>
+                </div>
+
+                <button class="btn btn-primary" type="submit">Save Changes</button>
+            </form>
+            <form method="post" action="/delete/{entry.id}" style="margin-top: 8px;"
+                  onsubmit="return confirm('Delete this entry?');">
+                <button class="btn btn-danger" type="submit">Delete Entry</button>
+            </form>
+        </div>
+
+        <script>
+        function selectMeal(el, slot) {{
+            document.querySelectorAll('.meal-option').forEach(e => e.classList.remove('selected'));
+            el.classList.add('selected');
+            document.getElementById('meal_slot').value = slot;
+        }}
+        </script>"""
+        return page("Edit Entry", body)
+    finally:
+        db.close()
+
+
+@app.route("/edit/<int:entry_id>", methods=["POST"])
+@login_required
+def edit_food_submit(entry_id):
+    db = get_session()
+    try:
+        entry = db.query(FoodEntry).get(entry_id)
+        if not entry:
+            return redirect(url_for("home"))
+        item = db.query(FoodItem).get(entry.food_item_id)
+
+        # Update food item
+        item.name = request.form.get("name", "").strip()
+        item.brand = request.form.get("brand", "").strip() or None
+        for field_name, _, _ in NUTRIENT_FIELDS:
+            setattr(item, field_name, _parse_float(request.form.get(field_name)))
+
+        # Update entry
+        entry.meal_slot = request.form.get("meal_slot", entry.meal_slot)
+        entry.quantity = _parse_float(request.form.get("quantity"), 1.0)
+        entry.notes = request.form.get("notes", "").strip() or None
+
+        consumed_at_str = request.form.get("consumed_at", "")
+        if consumed_at_str:
+            entry.consumed_at = datetime.fromisoformat(consumed_at_str)
+
+        # Update tags: delete old, insert new
+        db.query(FoodTag).filter(FoodTag.food_item_id == item.id).delete()
+        for tag_name in request.form.get("tags", "").split(","):
+            tag_name = tag_name.strip().lower()
+            if tag_name:
+                db.add(FoodTag(food_item_id=item.id, tag=tag_name))
+
+        db.commit()
+        return redirect(url_for("home", saved=1))
+    finally:
+        db.close()
+
+
+@app.route("/delete/<int:entry_id>", methods=["POST"])
+@login_required
+def delete_food(entry_id):
+    db = get_session()
+    try:
+        entry = db.query(FoodEntry).get(entry_id)
+        if entry:
+            # Delete tags and food item if no other entries reference it
+            item_id = entry.food_item_id
+            db.delete(entry)
+            db.flush()
+
+            other_entries = db.query(FoodEntry).filter(
+                FoodEntry.food_item_id == item_id
+            ).count()
+            if other_entries == 0:
+                db.query(FoodTag).filter(FoodTag.food_item_id == item_id).delete()
+                item = db.query(FoodItem).get(item_id)
+                if item:
+                    db.delete(item)
+
+            db.commit()
+        return redirect(url_for("home"))
     finally:
         db.close()
 

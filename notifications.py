@@ -1,57 +1,90 @@
-"""Ntfy push notification scheduling for post-meal symptom check-ins."""
+"""Ntfy push notification scheduling for post-meal symptom check-ins.
 
-import threading
+Nudges are stored in the database and sent on the next request after
+they come due. This survives Fly.io machine sleep/restart.
+"""
+
 from datetime import datetime, timedelta
 
 import requests
 
 from config import Config
+from models import PendingNudge, get_session
 
 NTFY_URL = "https://ntfy.sh"
 
 
 def schedule_nudges(meal_slot: str, consumed_at: datetime, app_url: str = "https://food-tracker.fly.dev"):
-    """Schedule push notifications at 10min and 90min after a meal.
-
-    The 90-min nudge is skipped if it would fire after 10pm ET.
-    """
+    """Insert pending nudge rows for 10min and 90min after a meal."""
     if not Config.NTFY_TOPIC:
         return
 
-    now = datetime.now()
     meal_label = meal_slot.replace("-", " ")
-
-    # 10-minute nudge
-    delay_10 = max(0, (consumed_at + timedelta(minutes=10) - now).total_seconds())
-    threading.Timer(delay_10, _send_nudge, args=[
-        f"Quick check after {meal_label}",
-        f"How are you feeling? Tap to log any symptoms.",
-        f"{app_url}/symptom",
-    ]).start()
-
-    # 90-minute nudge (skip if it would land after 10pm)
-    fire_time_90 = consumed_at + timedelta(minutes=90)
-    if fire_time_90.hour < 22:  # Before 10pm
-        delay_90 = max(0, (fire_time_90 - now).total_seconds())
-        threading.Timer(delay_90, _send_nudge, args=[
-            f"How's digestion after {meal_label}?",
-            f"It's been 90 minutes. Tap to log how you're feeling.",
-            f"{app_url}/symptom",
-        ]).start()
-
-
-def _send_nudge(title: str, message: str, click_url: str):
-    """Send a push notification via ntfy.sh."""
+    db = get_session()
     try:
-        requests.post(
-            f"{NTFY_URL}/{Config.NTFY_TOPIC}",
-            headers={
-                "Title": title,
-                "Click": click_url,
-                "Tags": "fork_and_knife",
-            },
-            data=message,
-            timeout=10,
+        # 10-minute nudge
+        db.add(PendingNudge(
+            fire_at=consumed_at + timedelta(minutes=10),
+            title=f"Quick check after {meal_label}",
+            message="How are you feeling? Tap to log any symptoms.",
+        ))
+
+        # 90-minute nudge (skip if it would land after 10pm)
+        fire_90 = consumed_at + timedelta(minutes=90)
+        if fire_90.hour < 22:
+            db.add(PendingNudge(
+                fire_at=fire_90,
+                title=f"How's digestion after {meal_label}?",
+                message="It's been 90 minutes. Tap to log how you're feeling.",
+            ))
+
+        db.commit()
+    finally:
+        db.close()
+
+
+def send_due_nudges():
+    """Check for and send any nudges that are past due. Called on each request."""
+    if not Config.NTFY_TOPIC:
+        return
+
+    db = get_session()
+    try:
+        now = datetime.now()
+        due = (
+            db.query(PendingNudge)
+            .filter(PendingNudge.sent == 0, PendingNudge.fire_at <= now)
+            .all()
         )
+
+        for nudge in due:
+            try:
+                requests.post(
+                    f"{NTFY_URL}/{Config.NTFY_TOPIC}",
+                    headers={
+                        "Title": nudge.title,
+                        "Click": "https://food-tracker.fly.dev/symptom",
+                        "Tags": "fork_and_knife",
+                    },
+                    data=nudge.message,
+                    timeout=10,
+                )
+            except Exception:
+                pass  # Non-critical; will retry next request
+            else:
+                nudge.sent = 1
+
+        if due:
+            db.commit()
+
+        # Clean up old sent nudges (older than 24h)
+        cutoff = now - timedelta(hours=24)
+        db.query(PendingNudge).filter(
+            PendingNudge.sent == 1,
+            PendingNudge.fire_at < cutoff,
+        ).delete()
+        db.commit()
     except Exception:
-        pass  # Notification failure is non-critical
+        pass  # Don't let nudge processing break the request
+    finally:
+        db.close()

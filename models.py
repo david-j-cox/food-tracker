@@ -89,6 +89,16 @@ class SymptomTag(Base):
     symptom_entry = relationship("SymptomEntry", back_populates="tags")
 
 
+class PendingNudge(Base):
+    __tablename__ = "pending_nudges"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    fire_at = Column(DateTime, nullable=False)
+    title = Column(Text, nullable=False)
+    message = Column(Text, nullable=False)
+    sent = Column(Integer, nullable=False, default=0)  # 0=pending, 1=sent
+
+
 # ---------------------------------------------------------------------------
 # Engine & session setup
 # ---------------------------------------------------------------------------

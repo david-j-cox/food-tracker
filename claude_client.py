@@ -8,7 +8,7 @@ import anthropic
 from config import Config
 
 client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
-MODEL = "claude-3-5-sonnet-20241022"
+MODEL = "claude-sonnet-4-6"
 
 
 def identify_food(image_bytes: bytes, media_type: str = "image/jpeg") -> dict:

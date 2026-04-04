@@ -815,7 +815,7 @@ def scan_food():
                 <div class="upload-icon">📷</div>
                 <div>Tap to take a photo or choose from gallery</div>
                 <input type="file" id="photo" name="photo"
-                       accept="image/*" capture="environment"
+                       accept="image/*"
                        onchange="previewAndSubmit(this)">
             </div>
             <img id="preview" class="preview-img" style="display:none;">
@@ -1002,7 +1002,7 @@ def scan_label():
                 <div class="upload-icon">🏷️</div>
                 <div>Tap to photograph the nutrition label</div>
                 <input type="file" id="photo" name="photo"
-                       accept="image/*" capture="environment"
+                       accept="image/*"
                        onchange="previewAndSubmit(this)">
             </div>
             <img id="preview" class="preview-img" style="display:none;">

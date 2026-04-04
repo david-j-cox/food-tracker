@@ -16,7 +16,7 @@ from models import (
 )
 from claude_client import identify_food, extract_label, describe_serving_size
 from usda_client import search_foods, get_food_nutrients
-from notifications import schedule_nudges, send_due_nudges
+from notifications import schedule_nudges, start_background_nudger
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -29,11 +29,8 @@ app.config["PERMANENT_SESSION_LIFETIME"] = 60 * 60 * 24 * 30  # 30 days
 with app.app_context():
     init_db()
 
-
-@app.before_request
-def check_nudges():
-    """Send any due push notifications on each request."""
-    send_due_nudges()
+# Start background thread to send nudge notifications
+start_background_nudger()
 
 
 # ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ from models import (
 )
 from claude_client import identify_food, extract_label
 from usda_client import search_foods, get_food_nutrients
+from notifications import schedule_nudges
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -248,6 +249,13 @@ def _save_food_entry(db, food_item, meal_slot, quantity, consumed_at, notes, tag
             db.add(FoodTag(food_item_id=food_item.id, tag=tag_name))
 
     db.commit()
+
+    # Schedule post-meal symptom check-in notifications
+    try:
+        schedule_nudges(meal_slot, consumed_at)
+    except Exception:
+        pass  # Notification scheduling failure is non-critical
+
     return entry
 
 
@@ -1366,7 +1374,7 @@ def _handle_review_save():
 
 
 # ---------------------------------------------------------------------------
-# Routes: Quick Add placeholder (Phase 3)
+# Routes: Quick Add (Phase 3)
 # ---------------------------------------------------------------------------
 @app.route("/quick")
 @login_required
@@ -1375,11 +1383,186 @@ def quick_add():
     <a class="back-link" href="/home">&larr; Home</a>
     <div class="card">
         <h2>Quick Add</h2>
-        <p style="color:#888; text-align:center;">
-            Quick Add coming soon. Use Manual Entry for now.</p>
-        <a class="btn btn-secondary" href="/add">Go to Manual Entry</a>
-    </div>"""
+        <p style="color:#888; font-size:0.9em;">Search foods you've logged before.</p>
+        <div class="field">
+            <input type="text" id="search" placeholder="Start typing a food name..."
+                   autocomplete="off" autofocus oninput="doSearch(this.value)">
+        </div>
+        <div id="results"></div>
+    </div>
+
+    <div id="add-form" style="display:none;">
+        <div class="card">
+            <h3 id="selected-name"></h3>
+            <p id="selected-info" style="font-size:0.85em; color:#888;"></p>
+            <form method="post" action="/quick/add">
+                <input type="hidden" name="food_item_id" id="food_item_id">
+                <div class="field">
+                    <label>Meal</label>
+                    <div class="meal-grid" id="meal-grid"></div>
+                    <input type="hidden" name="meal_slot" id="meal_slot" value="snack">
+                </div>
+                <div class="field">
+                    <label for="quantity">Quantity (servings)</label>
+                    <input type="number" step="any" id="quantity" name="quantity"
+                           value="1" min="0.1" inputmode="decimal">
+                </div>
+                <div class="field">
+                    <label for="consumed_at">When?</label>
+                    <input type="datetime-local" id="consumed_at" name="consumed_at">
+                </div>
+                <button class="btn btn-primary" type="submit">Save</button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+    var searchTimeout = null;
+    var meals = """ + json.dumps(MEAL_SLOTS) + """;
+
+    // Build meal grid
+    var mealHtml = '';
+    meals.forEach(function(slot) {
+        var label = slot.replace('-', ' ');
+        label = label.charAt(0).toUpperCase() + label.slice(1);
+        var sel = slot === 'snack' ? 'selected' : '';
+        mealHtml += '<div class="meal-option ' + sel + '" onclick="selectMeal(this, \\'' + slot + '\\')">' + label + '</div>';
+    });
+    document.getElementById('meal-grid').innerHTML = mealHtml;
+
+    // Set default time
+    (function() {
+        var now = new Date();
+        now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+        document.getElementById('consumed_at').value = now.toISOString().slice(0, 16);
+    })();
+
+    function selectMeal(el, slot) {
+        document.querySelectorAll('.meal-option').forEach(e => e.classList.remove('selected'));
+        el.classList.add('selected');
+        document.getElementById('meal_slot').value = slot;
+    }
+
+    function doSearch(q) {
+        clearTimeout(searchTimeout);
+        if (q.length < 2) {
+            document.getElementById('results').innerHTML = '';
+            return;
+        }
+        searchTimeout = setTimeout(function() {
+            fetch('/quick/search?q=' + encodeURIComponent(q))
+                .then(r => r.json())
+                .then(renderResults);
+        }, 250);
+    }
+
+    function renderResults(items) {
+        var html = '';
+        if (items.length === 0) {
+            html = '<p style="color:#888; text-align:center; padding:12px;">No matches found.</p>';
+        }
+        items.forEach(function(item) {
+            var brand = item.brand ? ' <span style="color:#888; font-size:0.85em;">(' + item.brand + ')</span>' : '';
+            var cal = item.calories ? item.calories + ' kcal' : '';
+            var count = item.use_count > 1 ? '<span style="color:#2563eb; font-size:0.8em;">' + item.use_count + 'x logged</span>' : '';
+            html += '<div class="entry-item" style="cursor:pointer; padding:12px 0;" onclick=\\'selectItem(' + JSON.stringify(JSON.stringify(item)) + ')\\'>'
+                + '<strong>' + item.name + '</strong>' + brand
+                + '<span style="float:right; font-size:0.9em;">' + cal + '</span>'
+                + (count ? '<br>' + count : '')
+                + '</div>';
+        });
+        document.getElementById('results').innerHTML = html;
+    }
+
+    function selectItem(jsonStr) {
+        var item = JSON.parse(jsonStr);
+        document.getElementById('food_item_id').value = item.id;
+        document.getElementById('selected-name').textContent = item.name;
+        var info = [];
+        if (item.calories) info.push(item.calories + ' kcal');
+        if (item.protein_g) info.push(item.protein_g + 'g protein');
+        if (item.total_fat_g) info.push(item.total_fat_g + 'g fat');
+        if (item.carbohydrates_g) info.push(item.carbohydrates_g + 'g carbs');
+        document.getElementById('selected-info').textContent = info.join(' · ');
+        document.getElementById('add-form').style.display = 'block';
+        document.getElementById('add-form').scrollIntoView({behavior: 'smooth'});
+    }
+    </script>"""
     return page("Quick Add", body)
+
+
+@app.route("/quick/search")
+@login_required
+def quick_search():
+    q = request.args.get("q", "").strip()
+    if len(q) < 2:
+        return jsonify([])
+
+    db = get_session()
+    try:
+        # Search food items by name, ranked by usage frequency then recency
+        results = (
+            db.query(
+                FoodItem,
+                func.count(FoodEntry.id).label("use_count"),
+                func.max(FoodEntry.consumed_at).label("last_used"),
+            )
+            .outerjoin(FoodEntry)
+            .filter(FoodItem.name.ilike(f"%{q}%"))
+            .group_by(FoodItem.id)
+            .order_by(func.count(FoodEntry.id).desc(), func.max(FoodEntry.consumed_at).desc())
+            .limit(10)
+            .all()
+        )
+
+        items = []
+        for item, use_count, last_used in results:
+            items.append({
+                "id": item.id,
+                "name": item.name,
+                "brand": item.brand,
+                "calories": float(item.calories) if item.calories else None,
+                "protein_g": float(item.protein_g) if item.protein_g else None,
+                "total_fat_g": float(item.total_fat_g) if item.total_fat_g else None,
+                "carbohydrates_g": float(item.carbohydrates_g) if item.carbohydrates_g else None,
+                "use_count": use_count,
+            })
+        return jsonify(items)
+    finally:
+        db.close()
+
+
+@app.route("/quick/add", methods=["POST"])
+@login_required
+def quick_add_submit():
+    db = get_session()
+    try:
+        food_item_id = int(request.form.get("food_item_id", 0))
+        item = db.query(FoodItem).get(food_item_id)
+        if not item:
+            return redirect(url_for("quick_add"))
+
+        consumed_at_str = request.form.get("consumed_at", "")
+        consumed_at = datetime.fromisoformat(consumed_at_str) if consumed_at_str else datetime.now()
+
+        entry = FoodEntry(
+            food_item_id=item.id,
+            meal_slot=request.form.get("meal_slot", "snack"),
+            quantity=_parse_float(request.form.get("quantity"), 1.0),
+            consumed_at=consumed_at,
+        )
+        db.add(entry)
+        db.commit()
+
+        # Schedule nudges
+        try:
+            schedule_nudges(entry.meal_slot, consumed_at)
+        except Exception:
+            pass
+
+        return redirect(url_for("home", saved=1))
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------

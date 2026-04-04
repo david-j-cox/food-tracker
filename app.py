@@ -1317,6 +1317,7 @@ def _render_review_form(food_name, brand, nutrients, suggested_tags, source, act
             </div>
 
             <input type="hidden" name="source" value="{source}">
+            <input type="hidden" name="serving_size" value="{serving_size or ''}">
             <button class="btn btn-primary" type="submit">Save Entry</button>
         </form>
     </div>
@@ -1351,6 +1352,7 @@ def _handle_review_save():
         food_item = FoodItem(
             name=request.form.get("name", "").strip(),
             brand=request.form.get("brand", "").strip() or None,
+            serving_size=request.form.get("serving_size", "").strip() or None,
             source=request.form.get("source", "manual"),
         )
 
@@ -1404,6 +1406,7 @@ def quick_add():
                 </div>
                 <div class="field">
                     <label for="quantity">Quantity (servings)</label>
+                    <div id="serving-info" style="display:none; background:#eff6ff; border:1px solid #bfdbfe; border-radius:8px; padding:10px 14px; margin-bottom:8px; font-size:0.85em; color:#1e40af;"></div>
                     <input type="number" step="any" id="quantity" name="quantity"
                            value="1" min="0.1" inputmode="decimal">
                 </div>
@@ -1484,6 +1487,16 @@ def quick_add():
         if (item.total_fat_g) info.push(item.total_fat_g + 'g fat');
         if (item.carbohydrates_g) info.push(item.carbohydrates_g + 'g carbs');
         document.getElementById('selected-info').textContent = info.join(' · ');
+
+        // Show serving size info
+        var servingDiv = document.getElementById('serving-info');
+        if (item.serving_size) {
+            servingDiv.innerHTML = '<strong>1 serving = ' + item.serving_size + '</strong> — adjust quantity if you ate more or less';
+            servingDiv.style.display = 'block';
+        } else {
+            servingDiv.style.display = 'none';
+        }
+
         document.getElementById('add-form').style.display = 'block';
         document.getElementById('add-form').scrollIntoView({behavior: 'smooth'});
     }
@@ -1521,6 +1534,7 @@ def quick_search():
                 "id": item.id,
                 "name": item.name,
                 "brand": item.brand,
+                "serving_size": item.serving_size,
                 "calories": float(item.calories) if item.calories else None,
                 "protein_g": float(item.protein_g) if item.protein_g else None,
                 "total_fat_g": float(item.total_fat_g) if item.total_fat_g else None,
@@ -1617,6 +1631,7 @@ def api_entries():
                     "potassium_mg": float(fi.potassium_mg) if fi.potassium_mg else None,
                     "vitamin_b12_mcg": float(fi.vitamin_b12_mcg) if fi.vitamin_b12_mcg else None,
                     "vitamin_d_mcg": float(fi.vitamin_d_mcg) if fi.vitamin_d_mcg else None,
+                    "serving_size": fi.serving_size,
                     "source": fi.source,
                     "created_at": serialize_dt(fi.created_at),
                 } for fi in food_items

@@ -36,6 +36,7 @@ class FoodItem(Base):
     vitamin_b12_mcg = Column(Numeric, nullable=True)
     vitamin_d_mcg = Column(Numeric, nullable=True)
 
+    serving_size = Column(Text, nullable=True)  # e.g. "1 breast (172g)", "2/3 cup (55g)"
     source = Column(Text, nullable=False, default="manual")  # usda, nutrition_label, claude_vision, manual
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 

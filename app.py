@@ -954,6 +954,7 @@ def scan_food_select():
     source = "claude_vision"
     nutrients = scan_data.get("estimated", {})
     brand = None
+    serving_size = scan_data.get("estimated", {}).get("estimated_serving_size")
 
     if not skip_usda and match_idx >= 0:
         matches = scan_data.get("usda_matches", [])
@@ -961,6 +962,7 @@ def scan_food_select():
             match = matches[match_idx]
             try:
                 nutrients = get_food_nutrients(match["fdc_id"])
+                serving_size = nutrients.pop("serving_size", None)
                 food_name = match["description"]
                 brand = match.get("brand")
                 source = "usda"
@@ -976,6 +978,7 @@ def scan_food_select():
         source=source,
         action="/scan/food/save",
         back_url="/scan/food",
+        serving_size=serving_size,
     )
 
 
@@ -1049,6 +1052,7 @@ def scan_label_process():
         brand = result.get("brand")
         nutrients = result.get("nutrients", {})
         suggested_tags = result.get("suggested_tags", [])
+        serving_size = result.get("serving_size")
 
         return _render_review_form(
             food_name=food_name,
@@ -1058,6 +1062,7 @@ def scan_label_process():
             source="nutrition_label",
             action="/scan/label/save",
             back_url="/scan/label",
+            serving_size=serving_size,
         )
 
     except Exception as e:
@@ -1082,7 +1087,7 @@ def scan_label_save():
 # ---------------------------------------------------------------------------
 # Shared review form + save handler for scan flows
 # ---------------------------------------------------------------------------
-def _render_review_form(food_name, brand, nutrients, suggested_tags, source, action, back_url):
+def _render_review_form(food_name, brand, nutrients, suggested_tags, source, action, back_url, serving_size=None):
     """Render the review/edit form after scanning."""
     nutrient_inputs = ""
     for field_name, display, unit in NUTRIENT_FIELDS:
@@ -1123,6 +1128,7 @@ def _render_review_form(food_name, brand, nutrients, suggested_tags, source, act
             </div>
             <div class="field">
                 <label for="quantity">Quantity (servings)</label>
+                {"<div style='background:#eff6ff; border:1px solid #bfdbfe; border-radius:8px; padding:10px 14px; margin-bottom:8px; font-size:0.85em; color:#1e40af;'><strong>1 serving = " + str(serving_size) + "</strong> — adjust quantity if you ate more or less</div>" if serving_size else ""}
                 <input type="number" step="any" id="quantity" name="quantity"
                        value="1" min="0.1" inputmode="decimal">
             </div>

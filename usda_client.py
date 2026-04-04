@@ -57,7 +57,8 @@ def search_foods(query: str, limit: int = 5) -> list[dict]:
 def get_food_nutrients(fdc_id: int) -> dict:
     """Fetch full nutrient profile for a specific food item.
 
-    Returns dict with our standard nutrient column names as keys.
+    Returns dict with our standard nutrient column names as keys,
+    plus 'serving_size' describing what one serving is.
     """
     resp = requests.get(
         f"{BASE_URL}/food/{fdc_id}",
@@ -81,4 +82,45 @@ def get_food_nutrients(fdc_id: int) -> dict:
         if nid in NUTRIENT_MAP and amount is not None:
             nutrients[NUTRIENT_MAP[nid]] = round(float(amount), 2)
 
+    # Extract serving size info
+    serving_size = _extract_serving_size(data)
+    nutrients["serving_size"] = serving_size
+
     return nutrients
+
+
+def _extract_serving_size(data: dict) -> str:
+    """Extract a human-readable serving size from USDA food data."""
+    # Try servingSize + servingSizeUnit (common in Branded foods)
+    size = data.get("servingSize")
+    unit = data.get("servingSizeUnit", "g")
+    if size:
+        return f"{size}{unit}"
+
+    # Try foodPortions (common in Foundation/SR Legacy foods)
+    portions = data.get("foodPortions", [])
+    if portions:
+        p = portions[0]
+        amount = p.get("amount", "")
+        modifier = p.get("modifier", "")
+        gram_weight = p.get("gramWeight", "")
+        measure_unit = p.get("measureUnit", {}).get("abbreviation", "")
+
+        parts = []
+        if amount:
+            parts.append(str(amount))
+        if measure_unit:
+            parts.append(measure_unit)
+        if modifier:
+            parts.append(modifier)
+        if gram_weight:
+            parts.append(f"({gram_weight}g)")
+        if parts:
+            return " ".join(parts)
+
+    # Try householdServingFullText
+    household = data.get("householdServingFullText")
+    if household:
+        return household
+
+    return "100g (standard reference)"

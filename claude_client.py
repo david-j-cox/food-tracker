@@ -43,6 +43,7 @@ def identify_food(image_bytes: bytes, media_type: str = "image/jpeg") -> dict:
 {
   "food_name": "descriptive name of the food (e.g. 'Grilled chicken breast with steamed broccoli')",
   "search_term": "simplified USDA search term for the primary food item (e.g. 'chicken breast grilled')",
+  "estimated_serving_size": "estimate of the portion shown (e.g. '6 oz', '1.5 cups', '2 slices')",
   "estimated_nutrients": {
     "calories": number or null,
     "total_fat_g": number or null,

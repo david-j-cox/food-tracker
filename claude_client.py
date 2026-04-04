@@ -152,3 +152,32 @@ Return ONLY the JSON object, no other text.""",
         text = text.strip()
 
     return json.loads(text)
+
+
+def describe_serving_size(food_name: str, serving_size: str) -> str:
+    """Convert a technical serving size into an everyday visual reference.
+
+    Takes something like "156g" and returns something like
+    "156g (~2 handfuls, half a standard bowl)".
+    """
+    message = client.messages.create(
+        model=MODEL,
+        max_tokens=100,
+        messages=[
+            {
+                "role": "user",
+                "content": f"""For the food "{food_name}", the standard serving size is {serving_size}.
+
+Rewrite this as a short, practical reference that someone could eyeball without a scale. Include the original measurement plus an everyday comparison.
+
+Examples of good responses:
+- "172g (~size of your palm, or a deck of cards)"
+- "1 cup / 156g (~a baseball, fills half a soup bowl)"
+- "2 tbsp / 32g (~a golf ball)"
+- "85g (~size of a checkbook, 1/4 of a dinner plate)"
+
+Return ONLY the description, no other text. Keep it under 80 characters.""",
+            }
+        ],
+    )
+    return message.content[0].text.strip()

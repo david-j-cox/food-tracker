@@ -14,7 +14,7 @@ from models import (
     FoodItem, FoodEntry, FoodTag, SymptomEntry, SymptomTag,
     init_db, get_session,
 )
-from claude_client import identify_food, extract_label
+from claude_client import identify_food, extract_label, describe_serving_size
 from usda_client import search_foods, get_food_nutrients
 from notifications import schedule_nudges
 
@@ -1133,6 +1133,12 @@ def scan_food_select():
                 food_name = match["description"]
                 brand = match.get("brand")
                 source = "usda"
+                # Enrich serving size with visual reference
+                if serving_size:
+                    try:
+                        serving_size = describe_serving_size(food_name, serving_size)
+                    except Exception:
+                        pass  # Keep the raw USDA serving size
             except Exception:
                 pass  # Fall back to Claude's estimates
 

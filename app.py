@@ -2,6 +2,8 @@
 """Food Tracker — mobile-first food & symptom logging app."""
 
 import functools
+import json
+import traceback
 from datetime import datetime, timezone
 
 from flask import Flask, redirect, request, session, url_for, jsonify
@@ -12,6 +14,8 @@ from models import (
     FoodItem, FoodEntry, FoodTag, SymptomEntry, SymptomTag,
     init_db, get_session,
 )
+from claude_client import identify_food, extract_label
+from usda_client import search_foods, get_food_nutrients
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -707,7 +711,6 @@ def symptom_form():
 @app.route("/symptom", methods=["POST"])
 @login_required
 def symptom_submit():
-    import json
     db = get_session()
     try:
         symptoms = json.loads(request.form.get("symptoms_json", "{}"))
@@ -765,34 +768,436 @@ def history():
 
 
 # ---------------------------------------------------------------------------
-# Routes: Scan placeholders (Phase 2)
+# Routes: Scan Food (Phase 2)
 # ---------------------------------------------------------------------------
-@app.route("/scan/food")
+CAMERA_STYLE = """
+<style>
+  .upload-area {
+    border: 2px dashed #d1d5db; border-radius: 12px; padding: 40px 20px;
+    text-align: center; margin-bottom: 16px; cursor: pointer;
+    transition: border-color 0.2s;
+  }
+  .upload-area:hover, .upload-area.dragover { border-color: #2563eb; }
+  .upload-area input[type="file"] { display: none; }
+  .upload-icon { font-size: 2em; margin-bottom: 8px; }
+  .preview-img { max-width: 100%; border-radius: 8px; margin-bottom: 12px; }
+  .loading { text-align: center; padding: 40px; }
+  .spinner {
+    display: inline-block; width: 32px; height: 32px;
+    border: 3px solid #e5e7eb; border-top: 3px solid #2563eb;
+    border-radius: 50%; animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .match-card {
+    border: 2px solid #e5e7eb; border-radius: 8px; padding: 12px;
+    margin-bottom: 8px; cursor: pointer; transition: border-color 0.2s;
+  }
+  .match-card:hover, .match-card.selected { border-color: #2563eb; background: #eff6ff; }
+  .match-brand { font-size: 0.8em; color: #888; }
+  .match-type { font-size: 0.7em; color: #aaa; text-transform: uppercase; }
+  .error-msg { background: #fef2f2; border: 1px solid #fca5a5;
+    border-radius: 8px; padding: 12px; color: #991b1b; margin-bottom: 12px; }
+</style>
+"""
+
+
+@app.route("/scan/food", methods=["GET"])
 @login_required
 def scan_food():
-    body = """
+    body = f"""
+    {CAMERA_STYLE}
     <a class="back-link" href="/home">&larr; Home</a>
     <div class="card">
         <h2>Scan Food</h2>
-        <p style="color:#888; text-align:center;">
-            Camera scanning coming soon. Use Manual Entry for now.</p>
-        <a class="btn btn-secondary" href="/add">Go to Manual Entry</a>
-    </div>"""
+        <p style="color:#888; font-size:0.9em;">Take a photo of your food and we'll identify it.</p>
+        <form method="post" action="/scan/food" enctype="multipart/form-data" id="scan-form">
+            <div class="upload-area" onclick="document.getElementById('photo').click()">
+                <div class="upload-icon">📷</div>
+                <div>Tap to take a photo or choose from gallery</div>
+                <input type="file" id="photo" name="photo"
+                       accept="image/*" capture="environment"
+                       onchange="previewAndSubmit(this)">
+            </div>
+            <img id="preview" class="preview-img" style="display:none;">
+            <div id="loading" class="loading" style="display:none;">
+                <div class="spinner"></div>
+                <p>Identifying food...</p>
+            </div>
+            <button class="btn btn-primary" type="submit" id="submit-btn"
+                    style="display:none;">Analyze Photo</button>
+        </form>
+    </div>
+
+    <script>
+    function previewAndSubmit(input) {{
+        if (input.files && input.files[0]) {{
+            var reader = new FileReader();
+            reader.onload = function(e) {{
+                document.getElementById('preview').src = e.target.result;
+                document.getElementById('preview').style.display = 'block';
+                document.querySelector('.upload-area').style.display = 'none';
+                document.getElementById('loading').style.display = 'block';
+                document.getElementById('scan-form').submit();
+            }};
+            reader.readAsDataURL(input.files[0]);
+        }}
+    }}
+    </script>"""
     return page("Scan Food", body)
 
 
-@app.route("/scan/label")
+@app.route("/scan/food", methods=["POST"])
+@login_required
+def scan_food_process():
+    photo = request.files.get("photo")
+    if not photo:
+        return redirect(url_for("scan_food"))
+
+    try:
+        image_bytes = photo.read()
+        media_type = photo.content_type or "image/jpeg"
+
+        # Step 1: Claude identifies the food
+        result = identify_food(image_bytes, media_type)
+        food_name = result.get("food_name", "Unknown food")
+        search_term = result.get("search_term", food_name)
+        estimated = result.get("estimated_nutrients", {})
+        suggested_tags = result.get("suggested_tags", [])
+
+        # Step 2: Search USDA for matches
+        usda_matches = []
+        try:
+            usda_matches = search_foods(search_term, limit=5)
+        except Exception:
+            pass  # USDA search failure is non-fatal; we still have Claude's estimates
+
+        # Store in session for the next step
+        session["scan_data"] = {
+            "food_name": food_name,
+            "search_term": search_term,
+            "estimated": estimated,
+            "suggested_tags": suggested_tags,
+            "usda_matches": usda_matches,
+        }
+
+        # Render USDA match selection page
+        matches_html = ""
+        if usda_matches:
+            for i, m in enumerate(usda_matches):
+                brand_str = f'<div class="match-brand">{m["brand"]}</div>' if m.get("brand") else ""
+                matches_html += f"""
+                <div class="match-card" onclick="selectMatch({i})">
+                    <strong>{m['description']}</strong>
+                    {brand_str}
+                    <div class="match-type">{m['data_type']}</div>
+                    <input type="radio" name="match_idx" value="{i}"
+                           id="match_{i}" style="display:none;">
+                </div>"""
+        else:
+            matches_html = '<p style="color:#888;">No USDA matches found. Claude\'s estimates will be used.</p>'
+
+        body = f"""
+        {CAMERA_STYLE}
+        <a class="back-link" href="/scan/food">&larr; Retake Photo</a>
+        <div class="card">
+            <h2>Food Identified</h2>
+            <p><strong>{food_name}</strong></p>
+        </div>
+
+        <form method="post" action="/scan/food/select">
+            <div class="card">
+                <h3>Select USDA Match</h3>
+                <p style="font-size:0.85em; color:#888;">Pick the best match for accurate nutrients, or skip to use Claude's estimates.</p>
+                {matches_html}
+            </div>
+            <input type="hidden" name="match_idx" id="selected_match" value="-1">
+            <button class="btn btn-primary" type="submit">Use Selected Match</button>
+            <button class="btn btn-secondary" type="submit" name="skip_usda" value="1"
+                    style="margin-top: 4px;">Skip — Use Claude's Estimates</button>
+        </form>
+
+        <script>
+        function selectMatch(idx) {{
+            document.querySelectorAll('.match-card').forEach(c => c.classList.remove('selected'));
+            event.currentTarget.classList.add('selected');
+            document.getElementById('selected_match').value = idx;
+            document.getElementById('match_' + idx).checked = true;
+        }}
+        </script>"""
+        return page("Select Match", body)
+
+    except Exception as e:
+        body = f"""
+        {CAMERA_STYLE}
+        <a class="back-link" href="/scan/food">&larr; Try Again</a>
+        <div class="card">
+            <div class="error-msg">
+                <strong>Error analyzing photo:</strong> {str(e)}
+            </div>
+            <a class="btn btn-secondary" href="/add">Use Manual Entry Instead</a>
+        </div>"""
+        return page("Scan Error", body)
+
+
+@app.route("/scan/food/select", methods=["POST"])
+@login_required
+def scan_food_select():
+    scan_data = session.get("scan_data", {})
+    if not scan_data:
+        return redirect(url_for("scan_food"))
+
+    skip_usda = request.form.get("skip_usda")
+    match_idx = int(request.form.get("match_idx", -1))
+
+    food_name = scan_data["food_name"]
+    suggested_tags = scan_data.get("suggested_tags", [])
+    source = "claude_vision"
+    nutrients = scan_data.get("estimated", {})
+    brand = None
+
+    if not skip_usda and match_idx >= 0:
+        matches = scan_data.get("usda_matches", [])
+        if 0 <= match_idx < len(matches):
+            match = matches[match_idx]
+            try:
+                nutrients = get_food_nutrients(match["fdc_id"])
+                food_name = match["description"]
+                brand = match.get("brand")
+                source = "usda"
+            except Exception:
+                pass  # Fall back to Claude's estimates
+
+    # Render review form
+    return _render_review_form(
+        food_name=food_name,
+        brand=brand,
+        nutrients=nutrients,
+        suggested_tags=suggested_tags,
+        source=source,
+        action="/scan/food/save",
+        back_url="/scan/food",
+    )
+
+
+@app.route("/scan/food/save", methods=["POST"])
+@login_required
+def scan_food_save():
+    return _handle_review_save()
+
+
+# ---------------------------------------------------------------------------
+# Routes: Scan Label (Phase 2)
+# ---------------------------------------------------------------------------
+@app.route("/scan/label", methods=["GET"])
 @login_required
 def scan_label():
-    body = """
+    body = f"""
+    {CAMERA_STYLE}
     <a class="back-link" href="/home">&larr; Home</a>
     <div class="card">
-        <h2>Scan Label</h2>
-        <p style="color:#888; text-align:center;">
-            Label scanning coming soon. Use Manual Entry for now.</p>
-        <a class="btn btn-secondary" href="/add">Go to Manual Entry</a>
-    </div>"""
+        <h2>Scan Nutrition Label</h2>
+        <p style="color:#888; font-size:0.9em;">Take a photo of a nutrition label to extract values.</p>
+        <form method="post" action="/scan/label" enctype="multipart/form-data" id="scan-form">
+            <div class="upload-area" onclick="document.getElementById('photo').click()">
+                <div class="upload-icon">🏷️</div>
+                <div>Tap to photograph the nutrition label</div>
+                <input type="file" id="photo" name="photo"
+                       accept="image/*" capture="environment"
+                       onchange="previewAndSubmit(this)">
+            </div>
+            <img id="preview" class="preview-img" style="display:none;">
+            <div id="loading" class="loading" style="display:none;">
+                <div class="spinner"></div>
+                <p>Reading label...</p>
+            </div>
+            <button class="btn btn-primary" type="submit" id="submit-btn"
+                    style="display:none;">Analyze Label</button>
+        </form>
+    </div>
+
+    <script>
+    function previewAndSubmit(input) {{
+        if (input.files && input.files[0]) {{
+            var reader = new FileReader();
+            reader.onload = function(e) {{
+                document.getElementById('preview').src = e.target.result;
+                document.getElementById('preview').style.display = 'block';
+                document.querySelector('.upload-area').style.display = 'none';
+                document.getElementById('loading').style.display = 'block';
+                document.getElementById('scan-form').submit();
+            }};
+            reader.readAsDataURL(input.files[0]);
+        }}
+    }}
+    </script>"""
     return page("Scan Label", body)
+
+
+@app.route("/scan/label", methods=["POST"])
+@login_required
+def scan_label_process():
+    photo = request.files.get("photo")
+    if not photo:
+        return redirect(url_for("scan_label"))
+
+    try:
+        image_bytes = photo.read()
+        media_type = photo.content_type or "image/jpeg"
+
+        result = extract_label(image_bytes, media_type)
+        food_name = result.get("food_name", "Unknown Product")
+        brand = result.get("brand")
+        nutrients = result.get("nutrients", {})
+        suggested_tags = result.get("suggested_tags", [])
+
+        return _render_review_form(
+            food_name=food_name,
+            brand=brand,
+            nutrients=nutrients,
+            suggested_tags=suggested_tags,
+            source="nutrition_label",
+            action="/scan/label/save",
+            back_url="/scan/label",
+        )
+
+    except Exception as e:
+        body = f"""
+        {CAMERA_STYLE}
+        <a class="back-link" href="/scan/label">&larr; Try Again</a>
+        <div class="card">
+            <div class="error-msg">
+                <strong>Error reading label:</strong> {str(e)}
+            </div>
+            <a class="btn btn-secondary" href="/add">Use Manual Entry Instead</a>
+        </div>"""
+        return page("Scan Error", body)
+
+
+@app.route("/scan/label/save", methods=["POST"])
+@login_required
+def scan_label_save():
+    return _handle_review_save()
+
+
+# ---------------------------------------------------------------------------
+# Shared review form + save handler for scan flows
+# ---------------------------------------------------------------------------
+def _render_review_form(food_name, brand, nutrients, suggested_tags, source, action, back_url):
+    """Render the review/edit form after scanning."""
+    nutrient_inputs = ""
+    for field_name, display, unit in NUTRIENT_FIELDS:
+        val = nutrients.get(field_name, "") if nutrients else ""
+        if val is None:
+            val = ""
+        nutrient_inputs += f"""<div class="field">
+            <label for="{field_name}">{display} ({unit})</label>
+            <input type="number" step="any" id="{field_name}" name="{field_name}"
+                   value="{val}" inputmode="decimal">
+        </div>"""
+
+    meal_options = ""
+    for slot in MEAL_SLOTS:
+        meal_options += f"""<div class="meal-option" onclick="selectMeal(this, '{slot}')">
+            {slot.replace('-', ' ').title()}
+        </div>"""
+
+    tags_str = ", ".join(suggested_tags) if suggested_tags else ""
+
+    body = f"""
+    <a class="back-link" href="{back_url}">&larr; Rescan</a>
+    <div class="card">
+        <h2>Review & Save</h2>
+        <form method="post" action="{action}">
+            <div class="field">
+                <label for="name">Food Name</label>
+                <input type="text" id="name" name="name" value="{food_name}" required>
+            </div>
+            <div class="field">
+                <label for="brand">Brand</label>
+                <input type="text" id="brand" name="brand" value="{brand or ''}">
+            </div>
+            <div class="field">
+                <label>Meal</label>
+                <div class="meal-grid">{meal_options}</div>
+                <input type="hidden" name="meal_slot" id="meal_slot" value="snack">
+            </div>
+            <div class="field">
+                <label for="quantity">Quantity (servings)</label>
+                <input type="number" step="any" id="quantity" name="quantity"
+                       value="1" min="0.1" inputmode="decimal">
+            </div>
+            <div class="field">
+                <label for="consumed_at">When did you eat this?</label>
+                <input type="datetime-local" id="consumed_at" name="consumed_at">
+            </div>
+
+            <h3>Nutrients (per serving)</h3>
+            <div class="nutrient-grid">{nutrient_inputs}</div>
+
+            <div class="field" style="margin-top: 12px;">
+                <label for="tags">Tags (comma-separated)</label>
+                <input type="text" id="tags" name="tags" value="{tags_str}">
+            </div>
+            <div class="field">
+                <label for="notes">Notes (optional)</label>
+                <textarea id="notes" name="notes"></textarea>
+            </div>
+
+            <input type="hidden" name="source" value="{source}">
+            <button class="btn btn-primary" type="submit">Save Entry</button>
+        </form>
+    </div>
+
+    <script>
+    (function() {{
+        var now = new Date();
+        now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+        document.getElementById('consumed_at').value = now.toISOString().slice(0, 16);
+    }})();
+
+    function selectMeal(el, slot) {{
+        document.querySelectorAll('.meal-option').forEach(e => e.classList.remove('selected'));
+        el.classList.add('selected');
+        document.getElementById('meal_slot').value = slot;
+    }}
+    document.querySelector('.meal-option:nth-child(4)').classList.add('selected');
+    </script>"""
+    return page("Review", body)
+
+
+def _handle_review_save():
+    """Handle form submission from any scan review page."""
+    db = get_session()
+    try:
+        consumed_at_str = request.form.get("consumed_at", "")
+        if consumed_at_str:
+            consumed_at = datetime.fromisoformat(consumed_at_str)
+        else:
+            consumed_at = datetime.now()
+
+        food_item = FoodItem(
+            name=request.form.get("name", "").strip(),
+            brand=request.form.get("brand", "").strip() or None,
+            source=request.form.get("source", "manual"),
+        )
+
+        for field_name, _, _ in NUTRIENT_FIELDS:
+            setattr(food_item, field_name, _parse_float(request.form.get(field_name)))
+
+        tags = [t.strip() for t in request.form.get("tags", "").split(",") if t.strip()]
+
+        _save_food_entry(
+            db=db,
+            food_item=food_item,
+            meal_slot=request.form.get("meal_slot", "snack"),
+            quantity=_parse_float(request.form.get("quantity"), 1.0),
+            consumed_at=consumed_at,
+            notes=request.form.get("notes", "").strip(),
+            tags=tags,
+        )
+        return redirect(url_for("home", saved=1))
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------

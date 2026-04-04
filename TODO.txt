@@ -1,0 +1,32 @@
+Food Tracker — Future Analytics & Features
+==========================================
+
+Dashboard Phase 2: Food-Symptom Correlations
+---------------------------------------------
+- Time-lagged correlation: fat intake vs symptom events (what did I eat
+  in the 2 hours before each symptom?)
+- Food tag vs symptom heatmap (which tags — fried, dairy, spicy, etc. —
+  precede bad reactions most often?)
+- Meal slot analysis: do symptoms cluster after certain meals?
+- Cumulative daily fat load vs symptom likelihood
+
+Dashboard Phase 3: Cross-Correlation with WHOOP & Strava
+---------------------------------------------------------
+- Nutrient intake vs next-day WHOOP recovery score
+- Macro ratios vs WHOOP HRV and resting heart rate
+- Pre-run/post-run nutrition vs Strava performance (pace, effort)
+- Sleep quality (WHOOP) vs previous day's diet composition
+- Iron/magnesium intake trends vs running performance over time
+
+Other Analytics Ideas
+---------------------
+- Food variety score over time (are you eating the same things?)
+- Meal timing heatmap (when do you eat during the day?)
+- Nutrient gap analysis (which RDAs are you consistently missing?)
+- Week-over-week macro trend comparison
+- Recovery trajectory: symptom frequency/severity trend since surgery
+
+Caching & Performance
+---------------------
+- Cache all Sunday dashboard plots to disk (not just food tracking)
+  for faster dashboard load times

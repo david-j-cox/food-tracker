@@ -20,6 +20,8 @@ from models import (
 from claude_client import (
     identify_food, extract_label, describe_serving_size,
     generate_clarifying_questions, refine_estimate,
+    generate_initial_questions, identify_from_answers,
+    search_web_nutrition, estimate_with_context,
 )
 from usda_client import search_foods, get_food_nutrients
 from notifications import schedule_nudges, start_background_nudger
@@ -1034,83 +1036,80 @@ def scan_food_process():
         image_bytes = photo.read()
         media_type = photo.content_type or "image/jpeg"
 
-        # Step 1: Claude identifies the food
-        result = identify_food(image_bytes, media_type)
-        food_name = result.get("food_name", "Unknown food")
-        search_term = result.get("search_term", food_name)
-        estimated = result.get("estimated_nutrients", {})
-        suggested_tags = result.get("suggested_tags", [])
+        # Step 1: Claude generates questions to understand the food
+        questions = generate_initial_questions(image_bytes, media_type)
 
-        # Step 2: Search USDA for matches
-        usda_matches = []
-        try:
-            usda_matches = search_foods(search_term, limit=5)
-        except Exception:
-            pass  # USDA search failure is non-fatal; we still have Claude's estimates
-
-        # Save image to temp file so the clarify step can re-send it to Claude
+        # Save image to temp file for later steps
         tmp_dir = tempfile.gettempdir()
         img_filename = f"foodscan_{uuid.uuid4().hex}.jpg"
         img_path = os.path.join(tmp_dir, img_filename)
         with open(img_path, "wb") as f:
             f.write(image_bytes)
 
-        # Store in session for the next step
         session["scan_data"] = {
-            "food_name": food_name,
-            "search_term": search_term,
-            "estimated": estimated,
-            "suggested_tags": suggested_tags,
-            "usda_matches": usda_matches,
             "image_path": img_path,
             "media_type": media_type,
         }
+        session["clarify_questions"] = questions
 
-        # Render USDA match selection page
-        matches_html = ""
-        if usda_matches:
-            for i, m in enumerate(usda_matches):
-                brand_str = f'<div class="match-brand">{m["brand"]}</div>' if m.get("brand") else ""
-                matches_html += f"""
-                <div class="match-card" onclick="selectMatch({i})">
-                    <strong>{m['description']}</strong>
-                    {brand_str}
-                    <div class="match-type">{m['data_type']}</div>
-                    <input type="radio" name="match_idx" value="{i}"
-                           id="match_{i}" style="display:none;">
+        # Render questions page
+        questions_html = ""
+        for i, q in enumerate(questions):
+            question_text = q["question"]
+            options = q.get("options")
+            if options:
+                options_html = "".join(
+                    f'<label class="option-chip">'
+                    f'<input type="radio" name="answer_{i}" value="{opt}">'
+                    f'{opt}</label>'
+                    for opt in options
+                )
+                questions_html += f"""
+                <div class="clarify-question">
+                    <p><strong>{i + 1}. {question_text}</strong></p>
+                    <div class="option-chips">{options_html}</div>
+                    <input type="text" name="answer_{i}_other" placeholder="Or type your own..."
+                           class="form-input" style="margin-top:6px; font-size:0.85em;">
                 </div>"""
-        else:
-            matches_html = '<p style="color:#888;">No USDA matches found. Claude\'s estimates will be used.</p>'
+            else:
+                questions_html += f"""
+                <div class="clarify-question">
+                    <p><strong>{i + 1}. {question_text}</strong></p>
+                    <input type="text" name="answer_{i}" class="form-input"
+                           placeholder="Your answer...">
+                </div>"""
 
         body = f"""
         {CAMERA_STYLE}
+        <style>
+          .clarify-question {{ margin-bottom: 16px; }}
+          .clarify-question p {{ margin-bottom: 6px; }}
+          .option-chips {{ display: flex; flex-wrap: wrap; gap: 6px; }}
+          .option-chip {{
+            display: inline-block; padding: 6px 12px;
+            border: 2px solid #e5e7eb; border-radius: 20px;
+            cursor: pointer; font-size: 0.9em; transition: all 0.2s;
+          }}
+          .option-chip:has(input:checked) {{
+            border-color: #2563eb; background: #eff6ff; color: #2563eb;
+          }}
+          .option-chip input {{ display: none; }}
+        </style>
         <a class="back-link" href="/scan/food">&larr; Retake Photo</a>
         <div class="card">
-            <h2>Food Identified</h2>
-            <p><strong>{food_name}</strong></p>
+            <h2>Tell me about this food</h2>
+            <p style="font-size:0.85em; color:#888;">
+                Answer a few quick questions so I can find the best nutritional data.</p>
         </div>
-
-        <form method="post" action="/scan/food/select">
+        <form method="post" action="/scan/food/clarify">
             <div class="card">
-                <h3>Select USDA Match</h3>
-                <p style="font-size:0.85em; color:#888;">Pick the best match for accurate nutrients, or skip to use Claude's estimates.</p>
-                {matches_html}
+                {questions_html}
             </div>
-            <input type="hidden" name="match_idx" id="selected_match" value="-1">
-            <button class="btn btn-primary" type="submit">Use Selected Match</button>
-            <button class="btn btn-secondary" type="submit" name="skip_usda" value="1"
-                    style="margin-top: 4px;">Skip — Use Claude's Estimates</button>
-        </form>
-
-        <script>
-        function selectMatch(idx) {{
-            document.querySelectorAll('.match-card').forEach(c => c.classList.remove('selected'));
-            event.currentTarget.classList.add('selected');
-            document.getElementById('selected_match').value = idx;
-            document.getElementById('match_' + idx).checked = true;
-        }}
-        </script>"""
-        return page("Select Match", body)
+            <button class="btn btn-primary" type="submit">Find Nutrition Info</button>
+            <button class="btn btn-secondary" type="submit" name="skip_clarify" value="1"
+                    style="margin-top:4px;">Skip &mdash; Just Estimate from Photo</button>
+        </form>"""
+        return page("Describe Food", body)
 
     except Exception as e:
         body = f"""
@@ -1128,150 +1127,15 @@ def scan_food_process():
 @app.route("/scan/food/select", methods=["POST"])
 @login_required
 def scan_food_select():
-    scan_data = session.get("scan_data", {})
-    if not scan_data:
-        return redirect(url_for("scan_food"))
-
-    skip_usda = request.form.get("skip_usda")
-    match_idx = int(request.form.get("match_idx", -1))
-
-    # If skipping USDA, redirect to clarifying questions before estimating
-    if skip_usda:
-        return redirect(url_for("scan_food_clarify"))
-
-    food_name = scan_data["food_name"]
-    suggested_tags = scan_data.get("suggested_tags", [])
-    source = "claude_vision"
-    nutrients = scan_data.get("estimated", {})
-    brand = None
-    serving_size = scan_data.get("estimated", {}).get("estimated_serving_size")
-
-    if match_idx >= 0:
-        matches = scan_data.get("usda_matches", [])
-        if 0 <= match_idx < len(matches):
-            match = matches[match_idx]
-            try:
-                nutrients = get_food_nutrients(match["fdc_id"])
-                serving_size = nutrients.pop("serving_size", None)
-                food_name = match["description"]
-                brand = match.get("brand")
-                source = "usda"
-                # Enrich serving size with visual reference
-                if serving_size:
-                    try:
-                        serving_size = describe_serving_size(food_name, serving_size)
-                    except Exception:
-                        pass  # Keep the raw USDA serving size
-            except Exception:
-                pass  # Fall back to Claude's estimates
-
-    # Clean up temp image (not needed for USDA path)
-    img_path = scan_data.get("image_path")
-    if img_path:
-        try:
-            os.remove(img_path)
-        except OSError:
-            pass
-
-    # Render review form
-    return _render_review_form(
-        food_name=food_name,
-        brand=brand,
-        nutrients=nutrients,
-        suggested_tags=suggested_tags,
-        source=source,
-        action="/scan/food/save",
-        back_url="/scan/food",
-        serving_size=serving_size,
-    )
+    """Legacy route — the USDA match step is now handled automatically."""
+    return redirect(url_for("scan_food"))
 
 
 @app.route("/scan/food/clarify", methods=["GET"])
 @login_required
 def scan_food_clarify():
-    scan_data = session.get("scan_data", {})
-    if not scan_data:
-        return redirect(url_for("scan_food"))
-
-    food_name = scan_data["food_name"]
-    image_path = scan_data.get("image_path")
-
-    try:
-        with open(image_path, "rb") as f:
-            image_bytes = f.read()
-        media_type = scan_data.get("media_type", "image/jpeg")
-        questions = generate_clarifying_questions(food_name, image_bytes, media_type)
-        session["clarify_questions"] = questions
-    except Exception as e:
-        # If question generation fails, fall back to Claude's raw estimates
-        return _render_review_form(
-            food_name=food_name,
-            brand=None,
-            nutrients=scan_data.get("estimated", {}),
-            suggested_tags=scan_data.get("suggested_tags", []),
-            source="claude_vision",
-            action="/scan/food/save",
-            back_url="/scan/food",
-            serving_size=scan_data.get("estimated", {}).get("estimated_serving_size"),
-        )
-
-    questions_html = ""
-    for i, q in enumerate(questions):
-        question_text = q["question"]
-        options = q.get("options")
-        if options:
-            options_html = "".join(
-                f'<label class="option-chip">'
-                f'<input type="radio" name="answer_{i}" value="{opt}">'
-                f'{opt}</label>'
-                for opt in options
-            )
-            questions_html += f"""
-            <div class="clarify-question">
-                <p><strong>{i + 1}. {question_text}</strong></p>
-                <div class="option-chips">{options_html}</div>
-                <input type="text" name="answer_{i}_other" placeholder="Or type your own..."
-                       class="form-input" style="margin-top:6px; font-size:0.85em;">
-            </div>"""
-        else:
-            questions_html += f"""
-            <div class="clarify-question">
-                <p><strong>{i + 1}. {question_text}</strong></p>
-                <input type="text" name="answer_{i}" class="form-input"
-                       placeholder="Your answer...">
-            </div>"""
-
-    body = f"""
-    {CAMERA_STYLE}
-    <style>
-      .clarify-question {{ margin-bottom: 16px; }}
-      .clarify-question p {{ margin-bottom: 6px; }}
-      .option-chips {{ display: flex; flex-wrap: wrap; gap: 6px; }}
-      .option-chip {{
-        display: inline-block; padding: 6px 12px;
-        border: 2px solid #e5e7eb; border-radius: 20px;
-        cursor: pointer; font-size: 0.9em; transition: all 0.2s;
-      }}
-      .option-chip:has(input:checked) {{
-        border-color: #2563eb; background: #eff6ff; color: #2563eb;
-      }}
-      .option-chip input {{ display: none; }}
-    </style>
-    <a class="back-link" href="/scan/food">&larr; Retake Photo</a>
-    <div class="card">
-        <h2>A few quick questions</h2>
-        <p style="font-size:0.85em; color:#888;">
-            Help Claude nail the nutrients for <strong>{food_name}</strong>.</p>
-    </div>
-    <form method="post" action="/scan/food/clarify">
-        <div class="card">
-            {questions_html}
-        </div>
-        <button class="btn btn-primary" type="submit">Get Estimate</button>
-        <button class="btn btn-secondary" type="submit" name="skip_clarify" value="1"
-                style="margin-top:4px;">Skip &mdash; Use Quick Estimate</button>
-    </form>"""
-    return page("Clarify Food", body)
+    """Legacy route — questions are now shown directly after upload."""
+    return redirect(url_for("scan_food"))
 
 
 @app.route("/scan/food/clarify", methods=["POST"])
@@ -1281,27 +1145,53 @@ def scan_food_clarify_process():
     if not scan_data:
         return redirect(url_for("scan_food"))
 
-    food_name = scan_data["food_name"]
+    image_path = scan_data.get("image_path")
+    media_type = scan_data.get("media_type", "image/jpeg")
 
-    # If user skips, go straight to review with original estimates
+    try:
+        with open(image_path, "rb") as f:
+            image_bytes = f.read()
+    except Exception:
+        return redirect(url_for("scan_food"))
+
+    # If user skips questions, fall back to photo-only identification
     if request.form.get("skip_clarify"):
+        try:
+            result = identify_food(image_bytes, media_type)
+            food_name = result.get("food_name", "Unknown food")
+            search_term = result.get("search_term", food_name)
+
+            usda_nutrients = _try_usda_lookup(search_term)
+            web_data = _try_web_search(food_name, restaurant=None) if not usda_nutrients else None
+
+            final = estimate_with_context(
+                image_bytes, media_type,
+                qa_pairs=[],
+                food_name=food_name,
+                usda_nutrients=usda_nutrients,
+                web_nutrition=web_data,
+            )
+        except Exception:
+            final = {"food_name": "Unknown food", "estimated_nutrients": {}, "suggested_tags": []}
+
+        _cleanup_temp_image(image_path)
         return _render_review_form(
-            food_name=food_name,
+            food_name=final.get("food_name", "Unknown food"),
             brand=None,
-            nutrients=scan_data.get("estimated", {}),
-            suggested_tags=scan_data.get("suggested_tags", []),
-            source="claude_vision",
+            nutrients=final.get("estimated_nutrients", {}),
+            suggested_tags=final.get("suggested_tags", []),
+            source=final.get("data_source", "claude_vision"),
             action="/scan/food/save",
             back_url="/scan/food",
-            serving_size=scan_data.get("estimated", {}).get("estimated_serving_size"),
+            serving_size=final.get("estimated_serving_size"),
         )
 
+    # Collect answers from the questions form
     questions = session.get("clarify_questions", [])
     qa_pairs = []
     for i, q in enumerate(questions):
         options = q.get("options")
         if options:
-            # Prefer typed answer over radio selection
             answer = request.form.get(f"answer_{i}_other", "").strip()
             if not answer:
                 answer = request.form.get(f"answer_{i}", "")
@@ -1310,39 +1200,89 @@ def scan_food_clarify_process():
         qa_pairs.append({"question": q["question"], "answer": answer or "not sure"})
 
     try:
-        image_path = scan_data.get("image_path")
-        with open(image_path, "rb") as f:
-            image_bytes = f.read()
-        media_type = scan_data.get("media_type", "image/jpeg")
+        # Step 1: Identify food from photo + answers
+        identification = identify_from_answers(image_bytes, qa_pairs, media_type)
+        food_name = identification.get("food_name", "Unknown food")
+        search_term = identification.get("search_term", food_name)
+        restaurant = identification.get("restaurant")
 
-        refined = refine_estimate(food_name, qa_pairs, image_bytes, media_type)
-        refined_name = refined.get("food_name", food_name)
-        nutrients = refined.get("estimated_nutrients", {})
-        suggested_tags = refined.get("suggested_tags", scan_data.get("suggested_tags", []))
-        serving_size = refined.get("estimated_serving_size")
+        # Step 2: Search USDA silently
+        usda_nutrients = _try_usda_lookup(search_term)
 
-        # Clean up temp image
+        # Step 3: If no USDA match, search the web
+        web_data = None
+        if not usda_nutrients:
+            web_data = _try_web_search(food_name, restaurant)
+
+        # Step 4: Final estimate with all context
+        final = estimate_with_context(
+            image_bytes, media_type, qa_pairs,
+            food_name=food_name,
+            usda_nutrients=usda_nutrients,
+            web_nutrition=web_data,
+            restaurant=restaurant,
+        )
+
+        _cleanup_temp_image(image_path)
+
+        return _render_review_form(
+            food_name=final.get("food_name", food_name),
+            brand=None,
+            nutrients=final.get("estimated_nutrients", {}),
+            suggested_tags=final.get("suggested_tags", []),
+            source=final.get("data_source", "claude_vision"),
+            action="/scan/food/save",
+            back_url="/scan/food",
+            serving_size=final.get("estimated_serving_size"),
+        )
+    except Exception:
+        _cleanup_temp_image(image_path)
+        # Fall back to simple photo-only identification
+        try:
+            result = identify_food(image_bytes, media_type)
+            return _render_review_form(
+                food_name=result.get("food_name", "Unknown food"),
+                brand=None,
+                nutrients=result.get("estimated_nutrients", {}),
+                suggested_tags=result.get("suggested_tags", []),
+                source="claude_vision",
+                action="/scan/food/save",
+                back_url="/scan/food",
+                serving_size=result.get("estimated_serving_size"),
+            )
+        except Exception:
+            return redirect(url_for("scan_food"))
+
+
+def _try_usda_lookup(search_term: str) -> dict | None:
+    """Search USDA and return nutrients for the best match, or None."""
+    try:
+        matches = search_foods(search_term, limit=3)
+        if matches:
+            nutrients = get_food_nutrients(matches[0]["fdc_id"])
+            serving_size = nutrients.pop("serving_size", None)
+            if nutrients.get("calories") is not None:
+                return nutrients
+    except Exception:
+        pass
+    return None
+
+
+def _try_web_search(food_name: str, restaurant: str | None) -> dict | None:
+    """Search the web for nutrition info, or return None on failure."""
+    try:
+        return search_web_nutrition(food_name, restaurant)
+    except Exception:
+        return None
+
+
+def _cleanup_temp_image(image_path: str | None):
+    """Remove a temp image file if it exists."""
+    if image_path:
         try:
             os.remove(image_path)
         except OSError:
             pass
-    except Exception:
-        # Fall back to original estimates on any error
-        refined_name = food_name
-        nutrients = scan_data.get("estimated", {})
-        suggested_tags = scan_data.get("suggested_tags", [])
-        serving_size = scan_data.get("estimated", {}).get("estimated_serving_size")
-
-    return _render_review_form(
-        food_name=refined_name,
-        brand=None,
-        nutrients=nutrients,
-        suggested_tags=suggested_tags,
-        source="claude_vision",
-        action="/scan/food/save",
-        back_url="/scan/food",
-        serving_size=serving_size,
-    )
 
 
 @app.route("/scan/food/save", methods=["POST"])

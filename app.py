@@ -27,6 +27,26 @@ from usda_client import search_foods, get_food_nutrients
 from notifications import schedule_nudges, start_background_nudger
 
 # ---------------------------------------------------------------------------
+# Daily nutrient targets
+# ---------------------------------------------------------------------------
+DAILY_TARGETS = {
+    "calories": 2450,
+    "fat": 60,
+    "saturated_fat": 17,
+    "protein": 135,
+    "carbs": 340,
+    "fiber": 30,
+    "sugar": 50,
+    "sodium": 2300,
+    "iron": 8,
+    "calcium": 1000,
+    "magnesium": 420,
+    "potassium": 3400,
+    "vitamin_b12": 2.4,
+    "vitamin_d": 15,
+}
+
+# ---------------------------------------------------------------------------
 # App setup
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
@@ -176,14 +196,39 @@ STYLE = """
   .entry-meta { color: #888; font-size: 0.8em; }
 
   .totals {
-    display: grid; grid-template-columns: 1fr 1fr 1fr 1fr;
+    display: grid; grid-template-columns: 1fr 1fr;
     gap: 8px; text-align: center;
   }
   .total-box {
-    background: #f9fafb; border-radius: 8px; padding: 10px 4px;
+    background: #f9fafb; border-radius: 8px; padding: 10px 8px;
   }
-  .total-val { font-size: 1.3em; font-weight: 700; color: #2563eb; }
-  .total-label { font-size: 0.7em; color: #888; }
+  .total-val { font-size: 1.1em; font-weight: 700; color: #2563eb; }
+  .total-label { font-size: 0.7em; color: #888; margin-bottom: 6px; }
+  .progress-wrap {
+    background: #e5e7eb; border-radius: 4px; height: 6px;
+    margin-top: 4px; overflow: hidden;
+  }
+  .progress-bar {
+    height: 100%; border-radius: 4px; background: #2563eb;
+    transition: width 0.3s ease;
+  }
+  .progress-bar.near-target { background: #16a34a; }
+  .progress-bar.over-target { background: #f59e0b; }
+
+  .micro-toggle {
+    display: flex; align-items: center; justify-content: space-between;
+    cursor: pointer; user-select: none; padding: 4px 0;
+  }
+  .micro-toggle h3 { margin: 0; }
+  .micro-chevron {
+    font-size: 0.8em; color: #888;
+    transition: transform 0.2s ease;
+  }
+  .micro-chevron.open { transform: rotate(180deg); }
+  .micro-section {
+    display: none; margin-top: 10px;
+  }
+  .micro-section.open { display: block; }
 
   .flash { background: #d1fae5; border: 1px solid #6ee7b7;
     border-radius: 8px; padding: 12px; margin-bottom: 16px;
@@ -295,15 +340,46 @@ def _today_entries(db):
 
 
 def _daily_totals(food_entries):
-    """Sum up today's macros from food entries."""
-    totals = {"calories": 0, "fat": 0, "protein": 0, "carbs": 0}
+    """Sum up today's macro and micro nutrients from food entries."""
+    totals = {
+        "calories": 0, "fat": 0, "saturated_fat": 0, "protein": 0,
+        "carbs": 0, "fiber": 0, "sugar": 0, "sodium": 0,
+        "iron": 0, "calcium": 0, "magnesium": 0, "potassium": 0,
+        "vitamin_b12": 0, "vitamin_d": 0,
+    }
     for entry, item in food_entries:
         q = float(entry.quantity or 1)
         totals["calories"] += float(item.calories or 0) * q
         totals["fat"] += float(item.total_fat_g or 0) * q
+        totals["saturated_fat"] += float(item.saturated_fat_g or 0) * q
         totals["protein"] += float(item.protein_g or 0) * q
         totals["carbs"] += float(item.carbohydrates_g or 0) * q
+        totals["fiber"] += float(item.fiber_g or 0) * q
+        totals["sugar"] += float(item.sugar_g or 0) * q
+        totals["sodium"] += float(item.sodium_mg or 0) * q
+        totals["iron"] += float(item.iron_mg or 0) * q
+        totals["calcium"] += float(item.calcium_mg or 0) * q
+        totals["magnesium"] += float(item.magnesium_mg or 0) * q
+        totals["potassium"] += float(item.potassium_mg or 0) * q
+        totals["vitamin_b12"] += float(item.vitamin_b12_mcg or 0) * q
+        totals["vitamin_d"] += float(item.vitamin_d_mcg or 0) * q
     return totals
+
+
+def _progress_box(label, current, target, unit=""):
+    """Render a single nutrient box with progress bar."""
+    pct = min((current / target) * 100, 100) if target else 0
+    bar_class = "progress-bar"
+    if pct >= 100:
+        bar_class += " over-target"
+    elif pct >= 80:
+        bar_class += " near-target"
+    cur_display = f"{current:.1f}" if current < 10 and current != int(current) else str(int(current))
+    return f"""<div class="total-box">
+        <div class="total-label">{label}</div>
+        <div class="total-val">{cur_display}{unit} <span style="font-size:0.6em;font-weight:400;color:#888">/ {int(target) if target == int(target) else target}{unit}</span></div>
+        <div class="progress-wrap"><div class="{bar_class}" style="width:{pct:.0f}%"></div></div>
+    </div>"""
 
 
 def _render_food_list(food_entries):
@@ -416,21 +492,29 @@ def home():
         <div class="card">
             <h3>Today's Totals</h3>
             <div class="totals">
-                <div class="total-box">
-                    <div class="total-val">{int(totals['calories'])}</div>
-                    <div class="total-label">Calories</div>
+                {_progress_box("Calories", totals['calories'], DAILY_TARGETS['calories'], "kcal")}
+                {_progress_box("Protein", totals['protein'], DAILY_TARGETS['protein'], "g")}
+                {_progress_box("Carbs", totals['carbs'], DAILY_TARGETS['carbs'], "g")}
+                {_progress_box("Fat", totals['fat'], DAILY_TARGETS['fat'], "g")}
+                {_progress_box("Sat Fat", totals['saturated_fat'], DAILY_TARGETS['saturated_fat'], "g")}
+                {_progress_box("Fiber", totals['fiber'], DAILY_TARGETS['fiber'], "g")}
+                {_progress_box("Sugar", totals['sugar'], DAILY_TARGETS['sugar'], "g")}
+                {_progress_box("Sodium", totals['sodium'], DAILY_TARGETS['sodium'], "mg")}
+            </div>
+            <div style="margin-top: 12px;">
+                <div class="micro-toggle" onclick="document.getElementById('micro-section').classList.toggle('open'); document.getElementById('micro-chevron').classList.toggle('open');">
+                    <h3>Micronutrients</h3>
+                    <span id="micro-chevron" class="micro-chevron">&#9660;</span>
                 </div>
-                <div class="total-box">
-                    <div class="total-val">{int(totals['fat'])}g</div>
-                    <div class="total-label">Fat</div>
-                </div>
-                <div class="total-box">
-                    <div class="total-val">{int(totals['protein'])}g</div>
-                    <div class="total-label">Protein</div>
-                </div>
-                <div class="total-box">
-                    <div class="total-val">{int(totals['carbs'])}g</div>
-                    <div class="total-label">Carbs</div>
+                <div id="micro-section" class="micro-section">
+                    <div class="totals">
+                        {_progress_box("Iron", totals['iron'], DAILY_TARGETS['iron'], "mg")}
+                        {_progress_box("Calcium", totals['calcium'], DAILY_TARGETS['calcium'], "mg")}
+                        {_progress_box("Magnesium", totals['magnesium'], DAILY_TARGETS['magnesium'], "mg")}
+                        {_progress_box("Potassium", totals['potassium'], DAILY_TARGETS['potassium'], "mg")}
+                        {_progress_box("Vitamin B12", totals['vitamin_b12'], DAILY_TARGETS['vitamin_b12'], "mcg")}
+                        {_progress_box("Vitamin D", totals['vitamin_d'], DAILY_TARGETS['vitamin_d'], "mcg")}
+                    </div>
                 </div>
             </div>
         </div>

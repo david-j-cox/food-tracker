@@ -22,6 +22,7 @@ from claude_client import (
     generate_clarifying_questions, refine_estimate,
     generate_initial_questions, identify_from_answers,
     search_web_nutrition, estimate_with_context,
+    suggest_snack,
 )
 from usda_client import search_foods, get_food_nutrients
 from notifications import schedule_nudges, start_background_nudger
@@ -237,6 +238,11 @@ STYLE = """
   .back-link {
     display: inline-block; margin-bottom: 12px;
     color: #2563eb; text-decoration: none; font-size: 0.9em;
+  }
+
+  .snack-nutrient {
+    background: #e5e7eb; border-radius: 4px; padding: 2px 8px;
+    font-size: 0.8em; color: #333; white-space: nowrap;
   }
 </style>
 """
@@ -487,6 +493,7 @@ def home():
                 <a class="btn btn-success" href="/symptom">Log Symptom</a>
             </div>
             <a class="btn btn-secondary" href="/add" style="margin-top: 4px;">Manual Entry</a>
+            <a class="btn btn-success" href="/suggest-snack" style="margin-top: 4px;">Suggest a Snack</a>
         </div>
 
         <div class="card">
@@ -529,6 +536,51 @@ def home():
             {_render_symptom_list(symptoms)}
         </div>"""
         return page("Home", body)
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Routes: Suggest a snack
+# ---------------------------------------------------------------------------
+@app.route("/suggest-snack")
+@login_required
+def suggest_snack_page():
+    db = get_session()
+    try:
+        food, _ = _today_entries(db)
+        totals = _daily_totals(food)
+        suggestions = suggest_snack(totals, DAILY_TARGETS)
+
+        cards_html = ""
+        for s in suggestions:
+            nutrients = s.get("estimated_nutrients", {})
+            nutrient_tags = []
+            for key, val in nutrients.items():
+                if val:
+                    label = key.replace("_", " ").title()
+                    unit = "kcal" if key == "calories" else ("mg" if key in ("iron", "calcium", "magnesium", "potassium") else ("mcg" if key.startswith("vitamin") else "g"))
+                    nutrient_tags.append(f'<span class="snack-nutrient">{label}: {val}{unit}</span>')
+
+            cards_html += f"""
+            <div class="card">
+                <h3 style="margin-bottom: 4px;">{s['name']}</h3>
+                <p style="color: #555; font-size: 0.9em; margin-top: 4px;">{s['reason']}</p>
+                <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px;">
+                    {''.join(nutrient_tags)}
+                </div>
+            </div>"""
+
+        body = f"""
+        <a class="back-link" href="/home">&larr; Home</a>
+        <div class="card">
+            <h2>Snack Suggestions</h2>
+            <p style="color: #555; font-size: 0.9em;">Based on your nutrient gaps for today</p>
+        </div>
+        {cards_html}
+        <a class="btn btn-secondary" href="/suggest-snack">Refresh Suggestions</a>
+        """
+        return page("Suggest a Snack", body)
     finally:
         db.close()
 

@@ -297,6 +297,75 @@ Return ONLY the JSON object, no other text.""",
     return json.loads(text)
 
 
+def suggest_snack(current_totals: dict, daily_targets: dict) -> list[dict]:
+    """Suggest snacks to fill nutrient gaps without overshooting.
+
+    Returns list of dicts, each with:
+        name: str - snack name
+        reason: str - which gaps it fills
+        estimated_nutrients: dict - rough nutrient values
+    """
+    gaps = {}
+    for nutrient, target in daily_targets.items():
+        current = current_totals.get(nutrient, 0)
+        remaining = target - current
+        pct_remaining = (remaining / target * 100) if target else 0
+        gaps[nutrient] = {"current": round(current, 1), "target": target,
+                          "remaining": round(remaining, 1),
+                          "pct_remaining": round(pct_remaining, 1)}
+
+    message = client.messages.create(
+        model=MODEL,
+        max_tokens=1024,
+        messages=[
+            {
+                "role": "user",
+                "content": f"""I'm tracking my daily nutrition. Here are my current gaps (remaining amounts needed to hit my targets):
+
+{json.dumps(gaps, indent=2)}
+
+Suggest exactly 3 practical, real-food snack options that help fill the biggest nutrient gaps without significantly overshooting any nutrient that's already near or over its target.
+
+For each snack, consider:
+- Prioritize nutrients where pct_remaining is highest (most under-consumed)
+- Avoid suggesting snacks heavy in nutrients where remaining is negative or near zero
+- Keep snacks reasonable in size (100-400 calories)
+- Suggest specific, concrete foods (e.g. "1 cup Greek yogurt with 1 tbsp pumpkin seeds" not just "yogurt")
+
+Return a JSON array with exactly 3 objects, each with these keys:
+{{
+  "name": "specific snack description",
+  "reason": "1-2 sentences explaining which key gaps this fills",
+  "estimated_nutrients": {{
+    "calories": number,
+    "fat": number,
+    "protein": number,
+    "carbs": number,
+    "fiber": number,
+    "iron": number,
+    "calcium": number,
+    "magnesium": number,
+    "potassium": number,
+    "vitamin_b12": number,
+    "vitamin_d": number
+  }}
+}}
+
+Return ONLY the JSON array, no other text.""",
+            }
+        ],
+    )
+
+    text = message.content[0].text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+
+    return json.loads(text)
+
+
 def describe_serving_size(food_name: str, serving_size: str) -> str:
     """Convert a technical serving size into an everyday visual reference.
 

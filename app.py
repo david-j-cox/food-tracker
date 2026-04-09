@@ -244,6 +244,14 @@ STYLE = """
     background: #e5e7eb; border-radius: 4px; padding: 2px 8px;
     font-size: 0.8em; color: #333; white-space: nowrap;
   }
+
+  .trend-grid {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  .trend-box {
+    background: #f9fafb; border-radius: 8px; padding: 10px 8px;
+  }
 </style>
 """
 
@@ -491,9 +499,10 @@ def home():
                 <a class="btn btn-primary" href="/scan/label">Scan Label</a>
                 <a class="btn btn-secondary" href="/quick">Quick Add</a>
                 <a class="btn btn-success" href="/symptom">Log Symptom</a>
+                <a class="btn btn-secondary" href="/add">Manual Entry</a>
+                <a class="btn btn-success" href="/suggest-snack">Suggest a Snack</a>
+                <a class="btn btn-primary" href="/trends">Trends</a>
             </div>
-            <a class="btn btn-secondary" href="/add" style="margin-top: 4px;">Manual Entry</a>
-            <a class="btn btn-success" href="/suggest-snack" style="margin-top: 4px;">Suggest a Snack</a>
         </div>
 
         <div class="card">
@@ -583,6 +592,164 @@ def suggest_snack_page():
         return page("Suggest a Snack", body)
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# Routes: Nutrient trends
+# ---------------------------------------------------------------------------
+@app.route("/api/trends")
+@login_required
+def trends_api():
+    """Return 7 days of daily nutrient totals as JSON."""
+    from datetime import date, timedelta
+    db = get_session()
+    try:
+        today = date.today()
+        start = today - timedelta(days=6)
+        entries = (
+            db.query(FoodEntry, FoodItem)
+            .join(FoodItem)
+            .filter(func.date(FoodEntry.consumed_at) >= start)
+            .all()
+        )
+        # Group by date
+        by_date = {}
+        for entry, item in entries:
+            d = entry.consumed_at.date().isoformat()
+            by_date.setdefault(d, []).append((entry, item))
+
+        dates = [(start + timedelta(days=i)).isoformat() for i in range(7)]
+        nutrients = {key: [] for key in DAILY_TARGETS}
+        for d in dates:
+            totals = _daily_totals(by_date.get(d, []))
+            for key in DAILY_TARGETS:
+                nutrients[key].append(round(totals[key], 1))
+
+        return jsonify({"dates": dates, "nutrients": nutrients, "targets": DAILY_TARGETS})
+    finally:
+        db.close()
+
+
+TREND_MACROS = [
+    ("calories", "Calories", "kcal"),
+    ("protein", "Protein", "g"),
+    ("carbs", "Carbs", "g"),
+    ("fat", "Fat", "g"),
+    ("saturated_fat", "Sat Fat", "g"),
+    ("fiber", "Fiber", "g"),
+    ("sugar", "Sugar", "g"),
+    ("sodium", "Sodium", "mg"),
+]
+
+TREND_MICROS = [
+    ("iron", "Iron", "mg"),
+    ("calcium", "Calcium", "mg"),
+    ("magnesium", "Magnesium", "mg"),
+    ("potassium", "Potassium", "mg"),
+    ("vitamin_b12", "Vitamin B12", "mcg"),
+    ("vitamin_d", "Vitamin D", "mcg"),
+]
+
+
+@app.route("/trends")
+@login_required
+def trends_page():
+    def _chart_canvas(nutrient_key, label, unit):
+        return f'<div class="trend-box"><canvas id="chart-{nutrient_key}" data-key="{nutrient_key}" data-label="{label}" data-unit="{unit}"></canvas></div>'
+
+    macro_charts = "\n".join(_chart_canvas(k, l, u) for k, l, u in TREND_MACROS)
+    micro_charts = "\n".join(_chart_canvas(k, l, u) for k, l, u in TREND_MICROS)
+
+    body = f"""
+    <a class="back-link" href="/home">&larr; Home</a>
+    <div class="card">
+        <h2>7-Day Trends</h2>
+        <div class="trend-grid">
+            {macro_charts}
+        </div>
+        <div style="margin-top: 12px;">
+            <div class="micro-toggle" onclick="document.getElementById('micro-trends').classList.toggle('open'); document.getElementById('micro-chev2').classList.toggle('open');">
+                <h3>Micronutrients</h3>
+                <span id="micro-chev2" class="micro-chevron">&#9660;</span>
+            </div>
+            <div id="micro-trends" class="micro-section">
+                <div class="trend-grid">
+                    {micro_charts}
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+    <script>
+    fetch('/api/trends')
+      .then(r => r.json())
+      .then(data => {{
+        const shortDates = data.dates.map(d => {{
+          const parts = d.split('-');
+          return parts[1] + '/' + parts[2];
+        }});
+        document.querySelectorAll('.trend-box canvas').forEach(canvas => {{
+          const key = canvas.dataset.key;
+          const label = canvas.dataset.label;
+          const unit = canvas.dataset.unit;
+          const target = data.targets[key];
+          const values = data.nutrients[key];
+          new Chart(canvas, {{
+            type: 'line',
+            data: {{
+              labels: shortDates,
+              datasets: [
+                {{
+                  label: label + ' (' + unit + ')',
+                  data: values,
+                  borderColor: '#2563eb',
+                  backgroundColor: 'rgba(37,99,235,0.1)',
+                  fill: true,
+                  tension: 0.3,
+                  pointRadius: 4,
+                  pointBackgroundColor: '#2563eb',
+                }},
+                {{
+                  label: 'Target',
+                  data: Array(7).fill(target),
+                  borderColor: '#f59e0b',
+                  borderDash: [6, 4],
+                  borderWidth: 2,
+                  pointRadius: 0,
+                  fill: false,
+                }}
+              ]
+            }},
+            options: {{
+              responsive: true,
+              plugins: {{
+                legend: {{ display: false }},
+                title: {{
+                  display: true,
+                  text: label + ' (' + unit + ')',
+                  font: {{ size: 13, weight: '600' }},
+                  color: '#555',
+                  padding: {{ bottom: 8 }}
+                }}
+              }},
+              scales: {{
+                y: {{
+                  beginAtZero: true,
+                  grid: {{ color: '#f0f0f0' }},
+                  ticks: {{ font: {{ size: 10 }} }}
+                }},
+                x: {{
+                  grid: {{ display: false }},
+                  ticks: {{ font: {{ size: 10 }} }}
+                }}
+              }}
+            }}
+          }});
+        }});
+      }});
+    </script>
+    """
+    return page("Trends", body)
 
 
 # ---------------------------------------------------------------------------

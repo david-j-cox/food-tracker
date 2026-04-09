@@ -501,8 +501,8 @@ def home():
                 <a class="btn btn-success" href="/symptom">Log Symptom</a>
                 <a class="btn btn-secondary" href="/add">Manual Entry</a>
                 <a class="btn btn-success" href="/suggest-snack">Suggest a Snack</a>
-                <a class="btn btn-primary" href="/trends">Trends</a>
             </div>
+            <a class="btn btn-primary" href="/trends">Trends</a>
         </div>
 
         <div class="card">
@@ -667,16 +667,9 @@ def trends_page():
         <div class="trend-grid">
             {macro_charts}
         </div>
-        <div style="margin-top: 12px;">
-            <div class="micro-toggle" onclick="document.getElementById('micro-trends').classList.toggle('open'); document.getElementById('micro-chev2').classList.toggle('open');">
-                <h3>Micronutrients</h3>
-                <span id="micro-chev2" class="micro-chevron">&#9660;</span>
-            </div>
-            <div id="micro-trends" class="micro-section">
-                <div class="trend-grid">
-                    {micro_charts}
-                </div>
-            </div>
+        <h3 style="margin-top: 16px;">Micronutrients</h3>
+        <div class="trend-grid">
+            {micro_charts}
         </div>
     </div>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>

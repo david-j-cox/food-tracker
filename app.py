@@ -2,6 +2,7 @@
 """Food Tracker — mobile-first food & symptom logging app."""
 
 import functools
+import html
 import json
 import os
 import tempfile
@@ -22,9 +23,9 @@ from claude_client import (
     generate_clarifying_questions, refine_estimate,
     generate_initial_questions, identify_from_answers,
     search_web_nutrition, estimate_with_context,
-    suggest_snack,
+    suggest_snack, parse_description_to_ingredients,
 )
-from usda_client import search_foods, get_food_nutrients
+from usda_client import search_foods, get_food_nutrients, get_food_per_gram
 from notifications import schedule_nudges, start_background_nudger
 
 # ---------------------------------------------------------------------------
@@ -330,6 +331,80 @@ def _save_food_entry(db, food_item, meal_slot, quantity, consumed_at, notes, tag
     return entry
 
 
+def _estimate_from_description(description: str) -> dict:
+    """Estimate nutrients for a free-text food description.
+
+    Parses the description into ingredients via Claude, then uses USDA as
+    ground truth per ingredient where available, falling back to Claude's
+    per-portion estimate. Returns a dict with:
+        estimated_nutrients: dict of col -> value (or None)
+        ingredients: list of per-ingredient rows with source provenance
+        data_source: human summary like "USDA (3/4 ingredients)"
+    """
+    ingredients = parse_description_to_ingredients(description)
+
+    cols = [f[0] for f in NUTRIENT_FIELDS]
+    totals = {col: 0.0 for col in cols}
+    has_data = {col: False for col in cols}
+    per_ingredient = []
+    usda_hits = 0
+
+    for ing in ingredients:
+        grams = _parse_float(ing.get("grams"), 0.0) or 0.0
+        fallback = ing.get("fallback_nutrients") or {}
+        usda_query = (ing.get("usda_query") or "").strip()
+
+        source = "ai-estimate"
+        usda_match = None
+        ing_nutrients = {col: _parse_float(fallback.get(col)) for col in cols}
+
+        if usda_query and grams > 0:
+            try:
+                hits = search_foods(usda_query, limit=3)
+                per_gram = None
+                for hit in hits:
+                    per_gram = get_food_per_gram(hit["fdc_id"])
+                    if per_gram:
+                        usda_match = hit["description"]
+                        break
+                if per_gram:
+                    source = "usda"
+                    usda_hits += 1
+                    ing_nutrients = {
+                        col: (per_gram[col] * grams if per_gram.get(col) is not None else None)
+                        for col in cols
+                    }
+            except Exception:
+                traceback.print_exc()
+
+        for col in cols:
+            v = ing_nutrients.get(col)
+            if v is not None:
+                totals[col] += v
+                has_data[col] = True
+
+        per_ingredient.append({
+            "name": ing.get("name", ""),
+            "amount": ing.get("amount", ""),
+            "grams": grams,
+            "source": source,
+            "usda_match": usda_match,
+        })
+
+    rounded = {col: (round(totals[col], 2) if has_data[col] else None) for col in cols}
+    n = len(ingredients)
+    if n == 0:
+        data_source = "none"
+    else:
+        data_source = f"USDA ({usda_hits}/{n} ingredients)"
+
+    return {
+        "estimated_nutrients": rounded,
+        "ingredients": per_ingredient,
+        "data_source": data_source,
+    }
+
+
 def _today_entries(db):
     """Return today's food entries and symptom entries."""
     from datetime import date
@@ -571,13 +646,19 @@ def suggest_snack_page():
                     unit = "kcal" if key == "calories" else ("mg" if key in ("iron", "calcium", "magnesium", "potassium") else ("mcg" if key.startswith("vitamin") else "g"))
                     nutrient_tags.append(f'<span class="snack-nutrient">{label}: {val}{unit}</span>')
 
+            safe_name = html.escape(s.get("name", ""))
+            safe_reason = html.escape(s.get("reason", ""))
             cards_html += f"""
             <div class="card">
-                <h3 style="margin-bottom: 4px;">{s['name']}</h3>
-                <p style="color: #555; font-size: 0.9em; margin-top: 4px;">{s['reason']}</p>
+                <h3 style="margin-bottom: 4px;">{safe_name}</h3>
+                <p style="color: #555; font-size: 0.9em; margin-top: 4px;">{safe_reason}</p>
                 <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px;">
                     {''.join(nutrient_tags)}
                 </div>
+                <form method="post" action="/suggest-snack/refine" style="margin-top: 12px;">
+                    <input type="hidden" name="description" value="{safe_name}">
+                    <button class="btn btn-primary" type="submit" style="width: 100%;">Use this</button>
+                </form>
             </div>"""
 
         body = f"""
@@ -590,6 +671,202 @@ def suggest_snack_page():
         <a class="btn btn-secondary" href="/suggest-snack">Refresh Suggestions</a>
         """
         return page("Suggest a Snack", body)
+    finally:
+        db.close()
+
+
+@app.route("/suggest-snack/refine", methods=["POST"])
+@login_required
+def refine_snack_page():
+    """Render an editable form for a snack suggestion.
+
+    The user can edit the description, re-estimate nutrients via USDA, and
+    tweak any field before saving.
+    """
+    description = request.form.get("description", "").strip()
+    if not description:
+        return redirect(url_for("suggest_snack_page"))
+
+    safe_desc = html.escape(description)
+
+    nutrient_rows = ""
+    for field_name, display, unit in NUTRIENT_FIELDS:
+        nutrient_rows += f"""
+        <div class="field" style="display: flex; align-items: center; gap: 8px;">
+            <label for="{field_name}" style="flex: 1; margin: 0;">{display} ({unit})</label>
+            <input type="number" step="any" id="{field_name}" name="{field_name}"
+                   style="width: 110px;" inputmode="decimal">
+        </div>"""
+
+    meal_options = ""
+    for slot in MEAL_SLOTS:
+        label = slot.replace("-", " ").title()
+        sel = "selected" if slot == "snack" else ""
+        meal_options += f"""<div class="meal-option {sel}" onclick="selectMeal(this, '{slot}')">{label}</div>"""
+
+    body = f"""
+    <a class="back-link" href="/suggest-snack">&larr; Suggestions</a>
+    <div class="card">
+        <h2>Refine Snack</h2>
+        <p style="color:#555; font-size: 0.9em;">Edit the description, then re-estimate nutrients using USDA data.</p>
+
+        <form method="post" action="/suggest-snack/refine/save" id="refine-form">
+            <div class="field">
+                <label for="description">Description</label>
+                <textarea id="description" name="description" rows="3"
+                    placeholder="e.g. 1 cup Greek yogurt with 1 tbsp pumpkin seeds">{safe_desc}</textarea>
+            </div>
+
+            <button type="button" class="btn btn-secondary" onclick="reestimate()" id="reest-btn"
+                    style="width: 100%; margin-bottom: 12px;">Re-estimate nutrients</button>
+
+            <div id="ingredients-box" style="display:none; background:#eff6ff; border:1px solid #bfdbfe;
+                 border-radius:8px; padding:10px 14px; margin-bottom:12px; font-size:0.85em;"></div>
+
+            <div class="field">
+                <label>Meal</label>
+                <div class="meal-grid">{meal_options}</div>
+                <input type="hidden" name="meal_slot" id="meal_slot" value="snack">
+            </div>
+            <div class="field">
+                <label for="quantity">Quantity (servings)</label>
+                <input type="number" step="any" id="quantity" name="quantity"
+                       value="1" min="0.1" inputmode="decimal">
+            </div>
+            <div class="field">
+                <label for="consumed_at">When?</label>
+                <input type="datetime-local" id="consumed_at" name="consumed_at">
+            </div>
+
+            <h3>Nutrients (per serving)</h3>
+            <p style="color:#888; font-size:0.8em; margin-top: -4px;">
+                Click Re-estimate to fill these in, or edit manually.
+            </p>
+            {nutrient_rows}
+
+            <input type="hidden" name="data_source" id="data_source" value="ai-estimate">
+
+            <button class="btn btn-primary" type="submit" style="margin-top: 12px;">Save</button>
+        </form>
+    </div>
+
+    <script>
+    (function() {{
+        var now = new Date();
+        now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+        document.getElementById('consumed_at').value = now.toISOString().slice(0, 16);
+    }})();
+
+    function selectMeal(el, slot) {{
+        document.querySelectorAll('.meal-option').forEach(e => e.classList.remove('selected'));
+        el.classList.add('selected');
+        document.getElementById('meal_slot').value = slot;
+    }}
+
+    var NUTRIENT_COLS = {json.dumps([f[0] for f in NUTRIENT_FIELDS])};
+
+    function escapeHtml(s) {{
+        if (s == null) return '';
+        return String(s).replace(/[&<>"']/g, function(c) {{
+            return {{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c];
+        }});
+    }}
+
+    function reestimate() {{
+        var desc = document.getElementById('description').value.trim();
+        if (!desc) return;
+        var btn = document.getElementById('reest-btn');
+        btn.disabled = true;
+        btn.textContent = 'Estimating...';
+        fetch('/api/estimate-from-text', {{
+            method: 'POST',
+            headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify({{description: desc}})
+        }})
+        .then(r => r.json())
+        .then(function(data) {{
+            if (data.error) {{
+                alert('Error: ' + data.error);
+                return;
+            }}
+            var nutrients = data.estimated_nutrients || {{}};
+            NUTRIENT_COLS.forEach(function(col) {{
+                var val = nutrients[col];
+                document.getElementById(col).value = (val != null) ? val : '';
+            }});
+            document.getElementById('data_source').value = data.data_source || 'ai-estimate';
+            var box = document.getElementById('ingredients-box');
+            var rows = (data.ingredients || []).map(function(ing) {{
+                var tag = ing.source === 'usda'
+                    ? '<span style="color:#065f46; background:#d1fae5; padding:1px 6px; border-radius:4px; font-size:0.8em;">USDA</span>'
+                    : '<span style="color:#92400e; background:#fef3c7; padding:1px 6px; border-radius:4px; font-size:0.8em;">AI estimate</span>';
+                var match = ing.usda_match ? ' <span style="color:#888;">(' + escapeHtml(ing.usda_match) + ')</span>' : '';
+                return '<div style="margin: 4px 0;">' + tag + ' <strong>' + escapeHtml(ing.name) + '</strong> — ' + escapeHtml(ing.amount) + match + '</div>';
+            }}).join('');
+            box.innerHTML = '<div style="font-weight:600; color:#1e40af; margin-bottom:4px;">' + escapeHtml(data.data_source || '') + '</div>' + rows;
+            box.style.display = 'block';
+        }})
+        .catch(function(e) {{ alert('Estimate failed: ' + e); }})
+        .finally(function() {{
+            btn.disabled = false;
+            btn.textContent = 'Re-estimate nutrients';
+        }});
+    }}
+    </script>"""
+    return page("Refine Snack", body)
+
+
+@app.route("/api/estimate-from-text", methods=["POST"])
+@login_required
+def estimate_from_text_api():
+    """Return aggregated nutrient estimate for a free-text food description."""
+    data = request.get_json(silent=True) or {}
+    description = (data.get("description") or "").strip()
+    if not description:
+        return jsonify({"error": "description is required"}), 400
+    try:
+        return jsonify(_estimate_from_description(description))
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/suggest-snack/refine/save", methods=["POST"])
+@login_required
+def refine_snack_save():
+    db = get_session()
+    try:
+        description = request.form.get("description", "").strip()
+        if not description:
+            return redirect(url_for("suggest_snack_page"))
+
+        consumed_at_str = request.form.get("consumed_at", "")
+        consumed_at = (
+            datetime.fromisoformat(consumed_at_str)
+            if consumed_at_str
+            else datetime.now()
+        )
+
+        data_source = request.form.get("data_source", "ai-estimate")
+        source_tag = "usda" if data_source.startswith("USDA") else "ai-estimate"
+
+        food_item = FoodItem(
+            name=description,
+            source=source_tag,
+        )
+        for field_name, _, _ in NUTRIENT_FIELDS:
+            setattr(food_item, field_name, _parse_float(request.form.get(field_name)))
+
+        _save_food_entry(
+            db=db,
+            food_item=food_item,
+            meal_slot=request.form.get("meal_slot", "snack"),
+            quantity=_parse_float(request.form.get("quantity"), 1.0),
+            consumed_at=consumed_at,
+            notes=None,
+            tags=[],
+        )
+        return redirect(url_for("home", saved=1))
     finally:
         db.close()
 

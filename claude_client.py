@@ -687,3 +687,66 @@ Return ONLY the JSON object, no other text.""",
         text = text.strip()
 
     return json.loads(text)
+
+
+def parse_description_to_ingredients(description: str) -> list[dict]:
+    """Parse a free-text food description into a structured ingredient list.
+
+    Each ingredient has an estimated gram weight, a USDA search term, and a
+    fallback nutrient estimate per the user's portion (used when USDA has
+    no match).
+    """
+    message = client.messages.create(
+        model=MODEL,
+        max_tokens=1500,
+        messages=[
+            {
+                "role": "user",
+                "content": f"""Parse this food description into its component ingredients.
+
+Description: {description}
+
+For each ingredient, determine:
+1. A clean ingredient name
+2. The amount the user stated (or implied if a single item)
+3. An estimated gram weight for that amount (e.g. 1 tbsp pumpkin seeds ~ 8g, 1 cup Greek yogurt ~ 245g, 1 medium apple ~ 182g)
+4. A clean USDA FoodData Central search term (generic, no brands, e.g. "greek yogurt plain" not "Fage 2% Greek Yogurt")
+5. A FALLBACK nutrient estimate for the user's exact portion (only used if USDA has no match)
+
+Return a JSON array. Each object must have exactly these keys:
+{{
+  "name": "Greek yogurt",
+  "amount": "1 cup",
+  "grams": 245,
+  "usda_query": "greek yogurt plain",
+  "fallback_nutrients": {{
+    "calories": number or null,
+    "total_fat_g": number or null,
+    "saturated_fat_g": number or null,
+    "protein_g": number or null,
+    "carbohydrates_g": number or null,
+    "fiber_g": number or null,
+    "sugar_g": number or null,
+    "sodium_mg": number or null,
+    "iron_mg": number or null,
+    "calcium_mg": number or null,
+    "magnesium_mg": number or null,
+    "potassium_mg": number or null,
+    "vitamin_b12_mcg": number or null,
+    "vitamin_d_mcg": number or null
+  }}
+}}
+
+Return ONLY the JSON array, no other text.""",
+            }
+        ],
+    )
+
+    text = message.content[0].text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+
+    return json.loads(text)

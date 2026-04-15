@@ -89,6 +89,58 @@ def get_food_nutrients(fdc_id: int) -> dict:
     return nutrients
 
 
+def get_food_per_gram(fdc_id: int) -> dict | None:
+    """Fetch USDA nutrients normalized to per-gram basis.
+
+    Returns a dict with our nutrient column names mapped to per-gram amounts,
+    plus 'source_description' and 'data_type'. Returns None if we can't
+    determine the gram basis (e.g. branded food with non-gram serving unit).
+    """
+    resp = requests.get(
+        f"{BASE_URL}/food/{fdc_id}",
+        params={"api_key": Config.USDA_API_KEY},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    data_type = data.get("dataType", "")
+    description = data.get("description", "")
+
+    if data_type in ("Foundation", "SR Legacy", "Survey (FNDDS)"):
+        gram_basis = 100.0
+    elif data_type == "Branded":
+        serving_size = data.get("servingSize")
+        serving_unit = (data.get("servingSizeUnit") or "").lower()
+        if not serving_size or serving_unit not in ("g", "gram", "grams"):
+            return None
+        try:
+            gram_basis = float(serving_size)
+        except (TypeError, ValueError):
+            return None
+    else:
+        return None
+
+    if gram_basis <= 0:
+        return None
+
+    per_gram = {col: None for col in NUTRIENT_MAP.values()}
+    for nutrient in data.get("foodNutrients", []):
+        if "nutrient" in nutrient:
+            nid = nutrient["nutrient"].get("id")
+            amount = nutrient.get("amount")
+        else:
+            nid = nutrient.get("nutrientId")
+            amount = nutrient.get("value") or nutrient.get("amount")
+
+        if nid in NUTRIENT_MAP and amount is not None:
+            per_gram[NUTRIENT_MAP[nid]] = float(amount) / gram_basis
+
+    per_gram["source_description"] = description
+    per_gram["data_type"] = data_type
+    return per_gram
+
+
 def _extract_serving_size(data: dict) -> str:
     """Extract a human-readable serving size from USDA food data."""
     # Try servingSize + servingSizeUnit (common in Branded foods)

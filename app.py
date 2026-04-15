@@ -1891,26 +1891,43 @@ def quick_add():
         }, 250);
     }
 
+    var lastResults = [];
+
+    function escapeHtml(s) {
+        if (s == null) return '';
+        return String(s).replace(/[&<>"']/g, function(c) {
+            return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+        });
+    }
+
     function renderResults(items) {
-        var html = '';
+        lastResults = items;
+        var resultsEl = document.getElementById('results');
         if (items.length === 0) {
-            html = '<p style="color:#888; text-align:center; padding:12px;">No matches found.</p>';
+            resultsEl.innerHTML = '<p style="color:#888; text-align:center; padding:12px;">No matches found.</p>';
+            return;
         }
-        items.forEach(function(item) {
-            var brand = item.brand ? ' <span style="color:#888; font-size:0.85em;">(' + item.brand + ')</span>' : '';
+        var html = '';
+        items.forEach(function(item, idx) {
+            var brand = item.brand ? ' <span style="color:#888; font-size:0.85em;">(' + escapeHtml(item.brand) + ')</span>' : '';
             var cal = item.calories ? item.calories + ' kcal' : '';
             var count = item.use_count > 1 ? '<span style="color:#2563eb; font-size:0.8em;">' + item.use_count + 'x logged</span>' : '';
-            html += '<div class="entry-item" style="cursor:pointer; padding:12px 0;" onclick=\\'selectItem(' + JSON.stringify(JSON.stringify(item)) + ')\\'>'
-                + '<strong>' + item.name + '</strong>' + brand
+            html += '<div class="entry-item" data-idx="' + idx + '" style="cursor:pointer; padding:12px 0;">'
+                + '<strong>' + escapeHtml(item.name) + '</strong>' + brand
                 + '<span style="float:right; font-size:0.9em;">' + cal + '</span>'
                 + (count ? '<br>' + count : '')
                 + '</div>';
         });
-        document.getElementById('results').innerHTML = html;
+        resultsEl.innerHTML = html;
+        resultsEl.querySelectorAll('.entry-item').forEach(function(el) {
+            el.addEventListener('click', function() {
+                var idx = parseInt(el.getAttribute('data-idx'), 10);
+                selectItem(lastResults[idx]);
+            });
+        });
     }
 
-    function selectItem(jsonStr) {
-        var item = JSON.parse(jsonStr);
+    function selectItem(item) {
         document.getElementById('food_item_id').value = item.id;
         document.getElementById('selected-name').textContent = item.name;
         var info = [];

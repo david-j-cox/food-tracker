@@ -33,11 +33,11 @@ from notifications import schedule_nudges, start_background_nudger
 # ---------------------------------------------------------------------------
 DAILY_TARGETS = {
     "calories": 2450,
-    "fat": 60,
-    "saturated_fat": 17,
+    "fat": 82,
+    "saturated_fat": 27,
     "protein": 135,
     "carbs": 340,
-    "fiber": 30,
+    "fiber": 38,
     "sugar": 50,
     "sodium": 2300,
     "iron": 8,

@@ -574,7 +574,7 @@ def home():
                 <a class="btn btn-primary" href="/scan/label">Scan Label</a>
                 <a class="btn btn-secondary" href="/quick">Quick Add</a>
                 <a class="btn btn-success" href="/symptom">Log Symptom</a>
-                <a class="btn btn-secondary" href="/add">Manual Entry</a>
+                <a class="btn btn-secondary" href="/describe">Describe Food</a>
                 <a class="btn btn-success" href="/suggest-snack">Suggest a Snack</a>
             </div>
             <a class="btn btn-primary" href="/trends">Trends</a>
@@ -1023,72 +1023,85 @@ def trends_page():
 
 
 # ---------------------------------------------------------------------------
-# Routes: Manual food entry
+# Routes: Describe food (text → estimated nutrients)
 # ---------------------------------------------------------------------------
-@app.route("/add", methods=["GET"])
+@app.route("/describe", methods=["GET"])
 @login_required
-def add_food_form():
-    nutrient_inputs = ""
+def describe_food_form():
+    nutrient_rows = ""
     for field_name, display, unit in NUTRIENT_FIELDS:
-        nutrient_inputs += f"""<div class="field">
-            <label for="{field_name}">{display} ({unit})</label>
+        nutrient_rows += f"""
+        <div class="field" style="display: flex; align-items: center; gap: 8px;">
+            <label for="{field_name}" style="flex: 1; margin: 0;">{display} ({unit})</label>
             <input type="number" step="any" id="{field_name}" name="{field_name}"
-                   placeholder="0" inputmode="decimal">
+                   style="width: 110px;" inputmode="decimal">
         </div>"""
 
     meal_options = ""
     for slot in MEAL_SLOTS:
-        meal_options += f"""<div class="meal-option" onclick="selectMeal(this, '{slot}')">
-            {slot.replace('-', ' ').title()}
-        </div>"""
+        label = slot.replace("-", " ").title()
+        sel = "selected" if slot == "snack" else ""
+        meal_options += f"""<div class="meal-option {sel}" onclick="selectMeal(this, '{slot}')">{label}</div>"""
 
     body = f"""
     <a class="back-link" href="/home">&larr; Home</a>
     <div class="card">
-        <h2>Add Food</h2>
-        <form method="post" action="/add" id="food-form">
+        <h2>Describe Food</h2>
+        <p style="color:#555; font-size: 0.9em;">Type what you ate and we'll look up the nutrition.</p>
+
+        <form method="post" action="/describe/save" id="describe-form">
             <div class="field">
-                <label for="name">Food Name</label>
-                <input type="text" id="name" name="name" required placeholder="e.g. Grilled chicken breast">
-            </div>
-            <div class="field">
-                <label for="brand">Brand (optional)</label>
-                <input type="text" id="brand" name="brand" placeholder="e.g. Tyson">
-            </div>
-            <div class="field">
-                <label>Meal</label>
-                <div class="meal-grid">{meal_options}</div>
-                <input type="hidden" name="meal_slot" id="meal_slot" value="snack">
-            </div>
-            <div class="field">
-                <label for="quantity">Quantity (servings)</label>
-                <input type="number" step="any" id="quantity" name="quantity"
-                       value="1" min="0.1" inputmode="decimal">
-            </div>
-            <div class="field">
-                <label for="consumed_at">When did you eat this?</label>
-                <input type="datetime-local" id="consumed_at" name="consumed_at">
+                <label for="description">Description</label>
+                <textarea id="description" name="description" rows="3" required
+                    placeholder="e.g. 2 scrambled eggs with 1 slice whole-wheat toast and butter"></textarea>
             </div>
 
-            <h3>Nutrients (per serving)</h3>
-            <div class="nutrient-grid">{nutrient_inputs}</div>
+            <button type="button" class="btn btn-primary" onclick="estimate()" id="est-btn"
+                    style="width: 100%; margin-bottom: 12px;">Estimate nutrients</button>
 
-            <div class="field" style="margin-top: 12px;">
-                <label for="tags">Tags (comma-separated)</label>
-                <input type="text" id="tags" name="tags"
-                       placeholder="e.g. high-fat, dairy, fried">
-            </div>
-            <div class="field">
-                <label for="notes">Notes (optional)</label>
-                <textarea id="notes" name="notes" placeholder="Any notes..."></textarea>
-            </div>
+            <div id="ingredients-box" style="display:none; background:#eff6ff; border:1px solid #bfdbfe;
+                 border-radius:8px; padding:10px 14px; margin-bottom:12px; font-size:0.85em;"></div>
 
-            <button class="btn btn-primary" type="submit">Save Entry</button>
+            <div id="details" style="display:none;">
+                <div class="field">
+                    <label>Meal</label>
+                    <div class="meal-grid">{meal_options}</div>
+                    <input type="hidden" name="meal_slot" id="meal_slot" value="snack">
+                </div>
+                <div class="field">
+                    <label for="quantity">Quantity (servings)</label>
+                    <input type="number" step="any" id="quantity" name="quantity"
+                           value="1" min="0.1" inputmode="decimal">
+                </div>
+                <div class="field">
+                    <label for="consumed_at">When?</label>
+                    <input type="datetime-local" id="consumed_at" name="consumed_at">
+                </div>
+
+                <h3>Nutrients (per serving)</h3>
+                <p style="color:#888; font-size:0.8em; margin-top: -4px;">
+                    Edit any value you want to correct.
+                </p>
+                {nutrient_rows}
+
+                <div class="field" style="margin-top: 12px;">
+                    <label for="tags">Tags (comma-separated, optional)</label>
+                    <input type="text" id="tags" name="tags"
+                           placeholder="e.g. high-fat, dairy, fried">
+                </div>
+                <div class="field">
+                    <label for="notes">Notes (optional)</label>
+                    <textarea id="notes" name="notes" placeholder="Any notes..."></textarea>
+                </div>
+
+                <input type="hidden" name="data_source" id="data_source" value="ai-estimate">
+
+                <button class="btn btn-primary" type="submit" style="margin-top: 12px;">Save</button>
+            </div>
         </form>
     </div>
 
     <script>
-    // Set default consumed_at to now
     (function() {{
         var now = new Date();
         now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
@@ -1100,29 +1113,85 @@ def add_food_form():
         el.classList.add('selected');
         document.getElementById('meal_slot').value = slot;
     }}
-    // Default select snack
-    document.querySelector('.meal-option:nth-child(4)').classList.add('selected');
+
+    var NUTRIENT_COLS = {json.dumps([f[0] for f in NUTRIENT_FIELDS])};
+
+    function escapeHtml(s) {{
+        if (s == null) return '';
+        return String(s).replace(/[&<>"']/g, function(c) {{
+            return {{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c];
+        }});
+    }}
+
+    function estimate() {{
+        var desc = document.getElementById('description').value.trim();
+        if (!desc) return;
+        var btn = document.getElementById('est-btn');
+        btn.disabled = true;
+        btn.textContent = 'Looking up...';
+        fetch('/api/estimate-from-text', {{
+            method: 'POST',
+            headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify({{description: desc}})
+        }})
+        .then(r => r.json())
+        .then(function(data) {{
+            if (data.error) {{
+                alert('Error: ' + data.error);
+                return;
+            }}
+            var nutrients = data.estimated_nutrients || {{}};
+            NUTRIENT_COLS.forEach(function(col) {{
+                var val = nutrients[col];
+                document.getElementById(col).value = (val != null) ? val : '';
+            }});
+            document.getElementById('data_source').value = data.data_source || 'ai-estimate';
+            var box = document.getElementById('ingredients-box');
+            var rows = (data.ingredients || []).map(function(ing) {{
+                var tag = ing.source === 'usda'
+                    ? '<span style="color:#065f46; background:#d1fae5; padding:1px 6px; border-radius:4px; font-size:0.8em;">USDA</span>'
+                    : '<span style="color:#92400e; background:#fef3c7; padding:1px 6px; border-radius:4px; font-size:0.8em;">AI estimate</span>';
+                var match = ing.usda_match ? ' <span style="color:#888;">(' + escapeHtml(ing.usda_match) + ')</span>' : '';
+                return '<div style="margin: 4px 0;">' + tag + ' <strong>' + escapeHtml(ing.name) + '</strong> — ' + escapeHtml(ing.amount) + match + '</div>';
+            }}).join('');
+            box.innerHTML = '<div style="font-weight:600; color:#1e40af; margin-bottom:4px;">' + escapeHtml(data.data_source || '') + '</div>' + rows;
+            box.style.display = 'block';
+            document.getElementById('details').style.display = 'block';
+            btn.textContent = 'Re-estimate';
+        }})
+        .catch(function(e) {{ alert('Estimate failed: ' + e); }})
+        .finally(function() {{
+            btn.disabled = false;
+            if (btn.textContent === 'Looking up...') btn.textContent = 'Estimate nutrients';
+        }});
+    }}
     </script>"""
-    return page("Add Food", body)
+    return page("Describe Food", body)
 
 
-@app.route("/add", methods=["POST"])
+@app.route("/describe/save", methods=["POST"])
 @login_required
-def add_food_submit():
+def describe_food_save():
     db = get_session()
     try:
-        consumed_at_str = request.form.get("consumed_at", "")
-        if consumed_at_str:
-            consumed_at = datetime.fromisoformat(consumed_at_str)
-        else:
-            consumed_at = datetime.now()
+        description = request.form.get("description", "").strip()
+        if not description:
+            return redirect(url_for("describe_food_form"))
 
-        food_item = FoodItem(
-            name=request.form.get("name", "").strip(),
-            brand=request.form.get("brand", "").strip() or None,
-            source="manual",
+        consumed_at_str = request.form.get("consumed_at", "")
+        consumed_at = (
+            datetime.fromisoformat(consumed_at_str)
+            if consumed_at_str
+            else datetime.now()
         )
 
+        data_source = request.form.get("data_source", "ai-estimate")
+        source_tag = "usda" if data_source.startswith("USDA") else "ai-estimate"
+
+        food_item = FoodItem(
+            name=description,
+            source=source_tag,
+        )
         for field_name, _, _ in NUTRIENT_FIELDS:
             setattr(food_item, field_name, _parse_float(request.form.get(field_name)))
 
@@ -1134,7 +1203,7 @@ def add_food_submit():
             meal_slot=request.form.get("meal_slot", "snack"),
             quantity=_parse_float(request.form.get("quantity"), 1.0),
             consumed_at=consumed_at,
-            notes=request.form.get("notes", "").strip(),
+            notes=request.form.get("notes", "").strip() or None,
             tags=tags,
         )
         return redirect(url_for("home", saved=1))
@@ -1692,7 +1761,7 @@ def scan_food_process():
             <div class="error-msg">
                 <strong>Error analyzing photo:</strong> {str(e)}
             </div>
-            <a class="btn btn-secondary" href="/add">Use Manual Entry Instead</a>
+            <a class="btn btn-secondary" href="/describe">Describe Instead</a>
         </div>"""
         return page("Scan Error", body)
 
@@ -1949,7 +2018,7 @@ def scan_label_process():
             <div class="error-msg">
                 <strong>Error reading label:</strong> {str(e)}
             </div>
-            <a class="btn btn-secondary" href="/add">Use Manual Entry Instead</a>
+            <a class="btn btn-secondary" href="/describe">Describe Instead</a>
         </div>"""
         return page("Scan Error", body)
 

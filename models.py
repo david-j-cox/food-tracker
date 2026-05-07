@@ -89,6 +89,38 @@ class SymptomTag(Base):
     symptom_entry = relationship("SymptomEntry", back_populates="tags")
 
 
+class DrinkEntry(Base):
+    __tablename__ = "drink_entries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    kind = Column(Text, nullable=False)  # "caffeine" or "alcohol"
+    subtype = Column(Text, nullable=True)  # coffee, espresso, tea, energy_drink, soda, beer, wine, spirit, cocktail, other
+    caffeine_mg = Column(Numeric, nullable=True)
+    standard_drinks = Column(Numeric, nullable=True)
+    consumed_at = Column(DateTime, nullable=False)
+    logged_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    notes = Column(Text, nullable=True)
+
+
+class StravaToken(Base):
+    __tablename__ = "strava_tokens"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    access_token = Column(Text, nullable=False)
+    refresh_token = Column(Text, nullable=False)
+    expires_at = Column(Integer, nullable=False)  # unix timestamp
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class StravaActivityCache(Base):
+    """Cache today's Strava activities so we don't hit the API on every page load."""
+    __tablename__ = "strava_activity_cache"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    fetched_at = Column(DateTime, nullable=False)
+    activities_json = Column(Text, nullable=False)  # JSON list of today's activities
+
+
 class PendingNudge(Base):
     __tablename__ = "pending_nudges"
 

@@ -15,9 +15,10 @@ from sqlalchemy import func
 
 from config import Config
 from models import (
-    FoodItem, FoodEntry, FoodTag, SymptomEntry, SymptomTag,
+    FoodItem, FoodEntry, FoodTag, SymptomEntry, SymptomTag, DrinkEntry,
     init_db, get_session,
 )
+from strava_client import get_todays_activities, workout_adjustment
 from claude_client import (
     identify_food, extract_label, describe_serving_size,
     generate_clarifying_questions, refine_estimate,
@@ -488,6 +489,70 @@ def _render_food_list(food_entries):
     return rows
 
 
+CAFFEINE_SUBTYPES = [
+    ("coffee", "Coffee (8oz)", 95),
+    ("espresso", "Espresso (1 shot)", 64),
+    ("tea_black", "Black tea (8oz)", 47),
+    ("tea_green", "Green tea (8oz)", 28),
+    ("energy_drink", "Energy drink", 80),
+    ("soda", "Soda (12oz)", 35),
+    ("other", "Other", None),
+]
+
+ALCOHOL_SUBTYPES = [
+    ("beer", "Beer (12oz, 5%)", 1.0),
+    ("light_beer", "Light beer (12oz, 4%)", 0.8),
+    ("ipa", "IPA / strong beer (12oz, 7%)", 1.4),
+    ("wine", "Wine (5oz, 12%)", 1.0),
+    ("spirit", "Spirit (1.5oz, 40%)", 1.0),
+    ("cocktail", "Cocktail", 1.5),
+    ("other", "Other", None),
+]
+
+
+def _today_drinks(db):
+    """Return today's drink entries."""
+    from datetime import date
+    today = date.today()
+    return (
+        db.query(DrinkEntry)
+        .filter(func.date(DrinkEntry.consumed_at) == today)
+        .order_by(DrinkEntry.consumed_at.desc())
+        .all()
+    )
+
+
+def _drink_totals(drink_entries):
+    caffeine_mg = 0.0
+    standard_drinks = 0.0
+    for d in drink_entries:
+        if d.kind == "caffeine" and d.caffeine_mg:
+            caffeine_mg += float(d.caffeine_mg)
+        elif d.kind == "alcohol" and d.standard_drinks:
+            standard_drinks += float(d.standard_drinks)
+    return {"caffeine_mg": round(caffeine_mg), "standard_drinks": round(standard_drinks, 1)}
+
+
+def _render_drink_list(drink_entries):
+    if not drink_entries:
+        return '<p style="color:#888; text-align:center;">No drinks logged today.</p>'
+    rows = ""
+    for d in drink_entries:
+        time_str = d.consumed_at.strftime("%-I:%M %p") if d.consumed_at else ""
+        if d.kind == "caffeine":
+            amount = f"{int(d.caffeine_mg)} mg" if d.caffeine_mg else ""
+            label = (d.subtype or "caffeine").replace("_", " ").title()
+        else:
+            amount = f"{float(d.standard_drinks):g} drinks" if d.standard_drinks else ""
+            label = (d.subtype or "alcohol").replace("_", " ").title()
+        rows += f"""<a href="/drink/edit/{d.id}" class="entry-item" style="display:block; text-decoration:none; color:inherit;">
+            <strong>{label}</strong>
+            <span style="float:right">{amount}</span><br>
+            <span class="entry-meta">{d.kind} &middot; {time_str} &middot; <span style="color:#2563eb;">tap to edit</span></span>
+        </a>"""
+    return rows
+
+
 def _render_symptom_list(symptom_entries):
     """Render today's symptom entries as HTML."""
     if not symptom_entries:
@@ -559,7 +624,31 @@ def home():
     db = get_session()
     try:
         food, symptoms = _today_entries(db)
+        drinks = _today_drinks(db)
         totals = _daily_totals(food)
+        drink_totals = _drink_totals(drinks)
+
+        # Workout-based target adjustment
+        try:
+            todays_workouts = get_todays_activities()
+            adjustment = workout_adjustment(todays_workouts)
+        except Exception:
+            traceback.print_exc()
+            adjustment = {"calories": 0, "protein": 0, "carbs": 0, "summary": ""}
+
+        adjusted_targets = dict(DAILY_TARGETS)
+        adjusted_targets["calories"] = DAILY_TARGETS["calories"] + adjustment["calories"]
+        adjusted_targets["protein"] = DAILY_TARGETS["protein"] + adjustment["protein"]
+        adjusted_targets["carbs"] = DAILY_TARGETS["carbs"] + adjustment["carbs"]
+
+        workout_banner = ""
+        if adjustment["calories"] > 0:
+            workout_banner = f"""<div style="background:#ecfdf5; border:1px solid #6ee7b7; border-radius:8px;
+                padding:10px 14px; margin-bottom:12px; font-size:0.85em; color:#065f46;">
+                <strong>Workout adjustment:</strong> +{adjustment['calories']} kcal,
+                +{adjustment['protein']}g protein, +{adjustment['carbs']}g carbs<br>
+                <span style="color:#047857; font-size:0.9em;">{html.escape(adjustment['summary'])}</span>
+            </div>"""
 
         flash_msg = ""
         if request.args.get("saved"):
@@ -576,21 +665,33 @@ def home():
                 <a class="btn btn-success" href="/symptom">Log Symptom</a>
                 <a class="btn btn-secondary" href="/describe">Describe Food</a>
                 <a class="btn btn-success" href="/suggest-snack">Suggest a Snack</a>
+                <a class="btn btn-secondary" href="/drink">Log a Drink</a>
+                <a class="btn btn-primary" href="/trends">Trends</a>
             </div>
-            <a class="btn btn-primary" href="/trends">Trends</a>
         </div>
 
         <div class="card">
             <h3>Today's Totals</h3>
+            {workout_banner}
             <div class="totals">
-                {_progress_box("Calories", totals['calories'], DAILY_TARGETS['calories'], "kcal")}
-                {_progress_box("Protein", totals['protein'], DAILY_TARGETS['protein'], "g")}
-                {_progress_box("Carbs", totals['carbs'], DAILY_TARGETS['carbs'], "g")}
+                {_progress_box("Calories", totals['calories'], adjusted_targets['calories'], "kcal")}
+                {_progress_box("Protein", totals['protein'], adjusted_targets['protein'], "g")}
+                {_progress_box("Carbs", totals['carbs'], adjusted_targets['carbs'], "g")}
                 {_progress_box("Fat", totals['fat'], DAILY_TARGETS['fat'], "g")}
                 {_progress_box("Sat Fat", totals['saturated_fat'], DAILY_TARGETS['saturated_fat'], "g")}
                 {_progress_box("Fiber", totals['fiber'], DAILY_TARGETS['fiber'], "g")}
                 {_progress_box("Sugar", totals['sugar'], DAILY_TARGETS['sugar'], "g")}
                 {_progress_box("Sodium", totals['sodium'], DAILY_TARGETS['sodium'], "mg")}
+            </div>
+            <div class="totals" style="margin-top:10px;">
+                <div class="total-box">
+                    <div class="total-label">Caffeine</div>
+                    <div class="total-val">{drink_totals['caffeine_mg']}<span style="font-size:0.6em;font-weight:400;color:#888"> mg</span></div>
+                </div>
+                <div class="total-box">
+                    <div class="total-label">Alcohol</div>
+                    <div class="total-val">{drink_totals['standard_drinks']:g}<span style="font-size:0.6em;font-weight:400;color:#888"> drinks</span></div>
+                </div>
             </div>
             <div style="margin-top: 12px;">
                 <div class="micro-toggle" onclick="document.getElementById('micro-section').classList.toggle('open'); document.getElementById('micro-chevron').classList.toggle('open');">
@@ -613,6 +714,11 @@ def home():
         <div class="card">
             <h3>Food Log</h3>
             {_render_food_list(food)}
+        </div>
+
+        <div class="card">
+            <h3>Drinks</h3>
+            {_render_drink_list(drinks)}
         </div>
 
         <div class="card">
@@ -895,14 +1001,36 @@ def trends_api():
             d = entry.consumed_at.date().isoformat()
             by_date.setdefault(d, []).append((entry, item))
 
+        # Drinks grouped by date
+        drink_rows = (
+            db.query(DrinkEntry)
+            .filter(func.date(DrinkEntry.consumed_at) >= start)
+            .all()
+        )
+        drinks_by_date = {}
+        for d in drink_rows:
+            key = d.consumed_at.date().isoformat()
+            drinks_by_date.setdefault(key, []).append(d)
+
         dates = [(start + timedelta(days=i)).isoformat() for i in range(7)]
         nutrients = {key: [] for key in DAILY_TARGETS}
+        caffeine_series = []
+        alcohol_series = []
         for d in dates:
             totals = _daily_totals(by_date.get(d, []))
             for key in DAILY_TARGETS:
                 nutrients[key].append(round(totals[key], 1))
+            d_totals = _drink_totals(drinks_by_date.get(d, []))
+            caffeine_series.append(d_totals["caffeine_mg"])
+            alcohol_series.append(d_totals["standard_drinks"])
 
-        return jsonify({"dates": dates, "nutrients": nutrients, "targets": DAILY_TARGETS})
+        return jsonify({
+            "dates": dates,
+            "nutrients": nutrients,
+            "targets": DAILY_TARGETS,
+            "caffeine_mg": caffeine_series,
+            "standard_drinks": alcohol_series,
+        })
     finally:
         db.close()
 
@@ -948,6 +1076,11 @@ def trends_page():
         <div class="trend-grid">
             {micro_charts}
         </div>
+        <h3 style="margin-top: 16px;">Drinks</h3>
+        <div class="trend-grid">
+            <div class="trend-box"><canvas id="chart-caffeine_mg" data-drink="caffeine_mg" data-label="Caffeine" data-unit="mg"></canvas></div>
+            <div class="trend-box"><canvas id="chart-standard_drinks" data-drink="standard_drinks" data-label="Alcohol" data-unit="drinks"></canvas></div>
+        </div>
     </div>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
     <script>
@@ -959,36 +1092,46 @@ def trends_page():
           return parts[1] + '/' + parts[2];
         }});
         document.querySelectorAll('.trend-box canvas').forEach(canvas => {{
-          const key = canvas.dataset.key;
+          const drinkKey = canvas.dataset.drink;
           const label = canvas.dataset.label;
           const unit = canvas.dataset.unit;
-          const target = data.targets[key];
-          const values = data.nutrients[key];
+          let values, target;
+          if (drinkKey) {{
+            values = data[drinkKey];
+            target = null;
+          }} else {{
+            const key = canvas.dataset.key;
+            target = data.targets[key];
+            values = data.nutrients[key];
+          }}
+          const datasets = [
+            {{
+              label: label + ' (' + unit + ')',
+              data: values,
+              borderColor: '#2563eb',
+              backgroundColor: 'rgba(37,99,235,0.1)',
+              fill: true,
+              tension: 0.3,
+              pointRadius: 4,
+              pointBackgroundColor: '#2563eb',
+            }}
+          ];
+          if (target !== null && target !== undefined) {{
+            datasets.push({{
+              label: 'Target',
+              data: Array(7).fill(target),
+              borderColor: '#f59e0b',
+              borderDash: [6, 4],
+              borderWidth: 2,
+              pointRadius: 0,
+              fill: false,
+            }});
+          }}
           new Chart(canvas, {{
             type: 'line',
             data: {{
               labels: shortDates,
-              datasets: [
-                {{
-                  label: label + ' (' + unit + ')',
-                  data: values,
-                  borderColor: '#2563eb',
-                  backgroundColor: 'rgba(37,99,235,0.1)',
-                  fill: true,
-                  tension: 0.3,
-                  pointRadius: 4,
-                  pointBackgroundColor: '#2563eb',
-                }},
-                {{
-                  label: 'Target',
-                  data: Array(7).fill(target),
-                  borderColor: '#f59e0b',
-                  borderDash: [6, 4],
-                  borderWidth: 2,
-                  pointRadius: 0,
-                  fill: false,
-                }}
-              ]
+              datasets: datasets,
             }},
             options: {{
               responsive: true,
@@ -1620,6 +1763,232 @@ CAMERA_STYLE = """
     border-radius: 8px; padding: 12px; color: #991b1b; margin-bottom: 12px; }
 </style>
 """
+
+
+# ---------------------------------------------------------------------------
+# Routes: Drink logging
+# ---------------------------------------------------------------------------
+def _render_drink_form(action_url, drink=None, delete_url=None):
+    """Render a drink form for create or edit."""
+    is_edit = drink is not None
+    kind = drink.kind if is_edit else "caffeine"
+    subtype = drink.subtype if is_edit else ""
+    caffeine_mg = (str(int(drink.caffeine_mg)) if drink and drink.caffeine_mg else "")
+    standard_drinks = (f"{float(drink.standard_drinks):g}" if drink and drink.standard_drinks else "")
+    notes = drink.notes or "" if is_edit else ""
+    consumed_at = drink.consumed_at.strftime("%Y-%m-%dT%H:%M") if (drink and drink.consumed_at) else ""
+
+    caffeine_options = "\n".join(
+        f'<option value="{k}" data-mg="{mg if mg is not None else ""}"{"selected" if subtype == k else ""}>{html.escape(label)}</option>'
+        for k, label, mg in CAFFEINE_SUBTYPES
+    )
+    alcohol_options = "\n".join(
+        f'<option value="{k}" data-drinks="{d if d is not None else ""}"{"selected" if subtype == k else ""}>{html.escape(label)}</option>'
+        for k, label, d in ALCOHOL_SUBTYPES
+    )
+
+    delete_block = ""
+    if delete_url:
+        delete_block = f"""
+        <form method="post" action="{delete_url}" style="margin-top:8px;"
+              onsubmit="return confirm('Delete this drink?');">
+            <button type="submit" class="btn btn-danger">Delete</button>
+        </form>"""
+
+    return f"""
+    <a class="back-link" href="/home">&larr; Home</a>
+    <div class="card">
+        <h2>{"Edit Drink" if is_edit else "Log a Drink"}</h2>
+        <form method="post" action="{action_url}">
+            <div class="field">
+                <label>Type</label>
+                <div class="meal-grid" style="grid-template-columns: 1fr 1fr;">
+                    <div class="meal-option {'selected' if kind == 'caffeine' else ''}"
+                         onclick="setKind('caffeine')" id="kind-caffeine">Caffeine</div>
+                    <div class="meal-option {'selected' if kind == 'alcohol' else ''}"
+                         onclick="setKind('alcohol')" id="kind-alcohol">Alcohol</div>
+                </div>
+                <input type="hidden" name="kind" id="kind-input" value="{kind}">
+            </div>
+
+            <div id="caffeine-fields" style="display:{'block' if kind == 'caffeine' else 'none'};">
+                <div class="field">
+                    <label for="caffeine-subtype">What kind?</label>
+                    <select id="caffeine-subtype" onchange="onCaffeineSubtypeChange()">
+                        <option value="">-- choose --</option>
+                        {caffeine_options}
+                    </select>
+                </div>
+                <div class="field">
+                    <label for="caffeine_mg">Caffeine (mg)</label>
+                    <input type="number" step="any" id="caffeine_mg" name="caffeine_mg"
+                           value="{caffeine_mg}" min="0" inputmode="decimal">
+                </div>
+            </div>
+
+            <div id="alcohol-fields" style="display:{'block' if kind == 'alcohol' else 'none'};">
+                <div class="field">
+                    <label for="alcohol-subtype">What kind?</label>
+                    <select id="alcohol-subtype" onchange="onAlcoholSubtypeChange()">
+                        <option value="">-- choose --</option>
+                        {alcohol_options}
+                    </select>
+                </div>
+                <div class="field">
+                    <label for="standard_drinks">Standard drinks</label>
+                    <input type="number" step="0.1" id="standard_drinks" name="standard_drinks"
+                           value="{standard_drinks}" min="0" inputmode="decimal">
+                    <span style="font-size:0.8em; color:#888;">12oz beer = 1, 5oz wine = 1, 1.5oz spirit = 1</span>
+                </div>
+            </div>
+
+            <div class="field">
+                <label for="consumed_at">When?</label>
+                <input type="datetime-local" id="consumed_at" name="consumed_at" value="{consumed_at}">
+            </div>
+            <div class="field">
+                <label for="notes">Notes (optional)</label>
+                <textarea id="notes" name="notes" rows="2">{html.escape(notes)}</textarea>
+            </div>
+            <button type="submit" class="btn btn-primary">{"Update" if is_edit else "Save"}</button>
+        </form>
+        {delete_block}
+    </div>
+    <script>
+    function setKind(k) {{
+        document.getElementById('kind-input').value = k;
+        document.getElementById('kind-caffeine').classList.toggle('selected', k === 'caffeine');
+        document.getElementById('kind-alcohol').classList.toggle('selected', k === 'alcohol');
+        document.getElementById('caffeine-fields').style.display = (k === 'caffeine') ? 'block' : 'none';
+        document.getElementById('alcohol-fields').style.display = (k === 'alcohol') ? 'block' : 'none';
+    }}
+    function onCaffeineSubtypeChange() {{
+        const sel = document.getElementById('caffeine-subtype');
+        const opt = sel.options[sel.selectedIndex];
+        const mg = opt.dataset.mg;
+        if (mg) document.getElementById('caffeine_mg').value = mg;
+    }}
+    function onAlcoholSubtypeChange() {{
+        const sel = document.getElementById('alcohol-subtype');
+        const opt = sel.options[sel.selectedIndex];
+        const d = opt.dataset.drinks;
+        if (d) document.getElementById('standard_drinks').value = d;
+    }}
+    // Default consumed_at to now if empty
+    (function() {{
+        const el = document.getElementById('consumed_at');
+        if (!el.value) {{
+            const now = new Date();
+            now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+            el.value = now.toISOString().slice(0, 16);
+        }}
+    }})();
+    </script>
+    """
+
+
+def _drink_subtype_for_save(kind, form):
+    if kind == "caffeine":
+        return form.get("caffeine-subtype") or form.get("subtype") or None
+    return form.get("alcohol-subtype") or form.get("subtype") or None
+
+
+@app.route("/drink", methods=["GET"])
+@login_required
+def drink_form():
+    return page("Log a Drink", _render_drink_form(action_url="/drink"))
+
+
+@app.route("/drink", methods=["POST"])
+@login_required
+def drink_submit():
+    kind = request.form.get("kind", "caffeine")
+    if kind not in ("caffeine", "alcohol"):
+        kind = "caffeine"
+
+    consumed_at_str = request.form.get("consumed_at") or ""
+    try:
+        consumed_at = datetime.fromisoformat(consumed_at_str) if consumed_at_str else datetime.now()
+    except ValueError:
+        consumed_at = datetime.now()
+
+    db = get_session()
+    try:
+        entry = DrinkEntry(
+            kind=kind,
+            subtype=_drink_subtype_for_save(kind, request.form),
+            caffeine_mg=_parse_float(request.form.get("caffeine_mg")) if kind == "caffeine" else None,
+            standard_drinks=_parse_float(request.form.get("standard_drinks")) if kind == "alcohol" else None,
+            consumed_at=consumed_at,
+            notes=request.form.get("notes") or None,
+        )
+        db.add(entry)
+        db.commit()
+    finally:
+        db.close()
+    return redirect(url_for("home", saved=1))
+
+
+@app.route("/drink/edit/<int:drink_id>", methods=["GET"])
+@login_required
+def drink_edit_form(drink_id):
+    db = get_session()
+    try:
+        drink = db.query(DrinkEntry).filter(DrinkEntry.id == drink_id).first()
+        if not drink:
+            return redirect(url_for("home"))
+        return page("Edit Drink", _render_drink_form(
+            action_url=f"/drink/edit/{drink_id}",
+            drink=drink,
+            delete_url=f"/drink/delete/{drink_id}",
+        ))
+    finally:
+        db.close()
+
+
+@app.route("/drink/edit/<int:drink_id>", methods=["POST"])
+@login_required
+def drink_edit_submit(drink_id):
+    kind = request.form.get("kind", "caffeine")
+    if kind not in ("caffeine", "alcohol"):
+        kind = "caffeine"
+
+    consumed_at_str = request.form.get("consumed_at") or ""
+    try:
+        consumed_at = datetime.fromisoformat(consumed_at_str) if consumed_at_str else None
+    except ValueError:
+        consumed_at = None
+
+    db = get_session()
+    try:
+        drink = db.query(DrinkEntry).filter(DrinkEntry.id == drink_id).first()
+        if not drink:
+            return redirect(url_for("home"))
+        drink.kind = kind
+        drink.subtype = _drink_subtype_for_save(kind, request.form)
+        drink.caffeine_mg = _parse_float(request.form.get("caffeine_mg")) if kind == "caffeine" else None
+        drink.standard_drinks = _parse_float(request.form.get("standard_drinks")) if kind == "alcohol" else None
+        if consumed_at:
+            drink.consumed_at = consumed_at
+        drink.notes = request.form.get("notes") or None
+        db.commit()
+    finally:
+        db.close()
+    return redirect(url_for("home", saved=1))
+
+
+@app.route("/drink/delete/<int:drink_id>", methods=["POST"])
+@login_required
+def drink_delete(drink_id):
+    db = get_session()
+    try:
+        drink = db.query(DrinkEntry).filter(DrinkEntry.id == drink_id).first()
+        if drink:
+            db.delete(drink)
+            db.commit()
+    finally:
+        db.close()
+    return redirect(url_for("home"))
 
 
 @app.route("/scan/food", methods=["GET"])
@@ -2404,6 +2773,7 @@ def api_entries():
             .filter(SymptomEntry.logged_at >= since)
             .all()
         )
+        drink_entries = db.query(DrinkEntry).filter(DrinkEntry.logged_at >= since).all()
 
         def serialize_dt(dt):
             return dt.isoformat() if dt else None
@@ -2457,6 +2827,16 @@ def api_entries():
                     "id": st.id, "symptom_entry_id": st.symptom_entry_id,
                     "tag": st.tag, "severity": st.severity,
                 } for st in symptom_tags
+            ],
+            "drink_entries": [
+                {
+                    "id": de.id, "kind": de.kind, "subtype": de.subtype,
+                    "caffeine_mg": float(de.caffeine_mg) if de.caffeine_mg else None,
+                    "standard_drinks": float(de.standard_drinks) if de.standard_drinks else None,
+                    "consumed_at": serialize_dt(de.consumed_at),
+                    "logged_at": serialize_dt(de.logged_at),
+                    "notes": de.notes,
+                } for de in drink_entries
             ],
         })
     finally:

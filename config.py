@@ -16,3 +16,7 @@ class Config:
     ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
     USDA_API_KEY = os.getenv("USDA_API_KEY")
     NTFY_TOPIC = os.getenv("NTFY_TOPIC")
+    STRAVA_CLIENT_ID = os.getenv("STRAVA_ID")
+    STRAVA_CLIENT_SECRET = os.getenv("STRAVA_SECRET")
+    STRAVA_INITIAL_REFRESH_TOKEN = os.getenv("STRAVA_REFRESH")
+    USER_WEIGHT_KG = float(os.getenv("USER_WEIGHT_KG", "75"))

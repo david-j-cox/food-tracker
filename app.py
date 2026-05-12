@@ -8,7 +8,7 @@ import os
 import tempfile
 import traceback
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from flask import Flask, redirect, request, session, url_for, jsonify
 from sqlalchemy import func
@@ -16,6 +16,7 @@ from sqlalchemy import func
 from config import Config
 from models import (
     FoodItem, FoodEntry, FoodTag, SymptomEntry, SymptomTag, DrinkEntry,
+    RejectedSnack, RejectedIngredient,
     init_db, get_session,
 )
 from strava_client import get_todays_activities, workout_adjustment
@@ -733,6 +734,23 @@ def home():
 # ---------------------------------------------------------------------------
 # Routes: Suggest a snack
 # ---------------------------------------------------------------------------
+REJECTION_WINDOW_DAYS = 5
+
+
+def _recent_rejections(db) -> tuple[list[str], list[str]]:
+    """Return (rejected_snack_names, rejected_ingredient_names) within the rolling window."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=REJECTION_WINDOW_DAYS)
+    snacks = [
+        r.name for r in
+        db.query(RejectedSnack).filter(RejectedSnack.rejected_at >= cutoff).all()
+    ]
+    ingredients = [
+        r.name for r in
+        db.query(RejectedIngredient).filter(RejectedIngredient.rejected_at >= cutoff).all()
+    ]
+    return snacks, ingredients
+
+
 @app.route("/suggest-snack")
 @login_required
 def suggest_snack_page():
@@ -740,10 +758,15 @@ def suggest_snack_page():
     try:
         food, _ = _today_entries(db)
         totals = _daily_totals(food)
-        suggestions = suggest_snack(totals, DAILY_TARGETS)
+        rejected_snacks, rejected_ingredients = _recent_rejections(db)
+        suggestions = suggest_snack(
+            totals, DAILY_TARGETS,
+            recent_rejected_snacks=rejected_snacks,
+            recent_rejected_ingredients=rejected_ingredients,
+        )
 
         cards_html = ""
-        for s in suggestions:
+        for idx, s in enumerate(suggestions):
             nutrients = s.get("estimated_nutrients", {})
             nutrient_tags = []
             for key, val in nutrients.items():
@@ -754,6 +777,36 @@ def suggest_snack_page():
 
             safe_name = html.escape(s.get("name", ""))
             safe_reason = html.escape(s.get("reason", ""))
+
+            ingredients = s.get("ingredients") or []
+            ingredient_checks = ""
+            for j, ing in enumerate(ingredients):
+                safe_ing = html.escape(str(ing))
+                ingredient_checks += f"""
+                    <label style="display:flex; align-items:center; gap:8px; padding:6px 0; min-height:32px;">
+                        <input type="checkbox" name="ingredient" value="{safe_ing}" style="width:18px; height:18px;">
+                        <span>{safe_ing}</span>
+                    </label>"""
+
+            missing_panel = ""
+            if ingredients:
+                missing_panel = f"""
+                <div id="missing-panel-{idx}" style="display:none; background:#fef3c7; border:1px solid #fde68a;
+                     border-radius:8px; padding:10px 14px; margin-top:10px;">
+                    <form method="post" action="/suggest-snack/reject-ingredients">
+                        <div style="font-weight:600; margin-bottom:6px;">Check what you don't have:</div>
+                        {ingredient_checks}
+                        <button class="btn btn-primary" type="submit" style="width:100%; margin-top:8px;">Confirm & refresh</button>
+                    </form>
+                </div>"""
+
+            dont_have_btn = ""
+            if ingredients:
+                dont_have_btn = f"""
+                <button type="button" class="btn btn-secondary"
+                        onclick="toggleMissing({idx})"
+                        style="width:100%; margin-top:8px;">I don't have some of this</button>"""
+
             cards_html += f"""
             <div class="card">
                 <h3 style="margin-bottom: 4px;">{safe_name}</h3>
@@ -765,6 +818,12 @@ def suggest_snack_page():
                     <input type="hidden" name="description" value="{safe_name}">
                     <button class="btn btn-primary" type="submit" style="width: 100%;">Use this</button>
                 </form>
+                {dont_have_btn}
+                <form method="post" action="/suggest-snack/skip" style="margin-top: 8px;">
+                    <input type="hidden" name="name" value="{safe_name}">
+                    <button class="btn btn-secondary" type="submit" style="width: 100%;">Skip — not in the mood</button>
+                </form>
+                {missing_panel}
             </div>"""
 
         body = f"""
@@ -775,10 +834,49 @@ def suggest_snack_page():
         </div>
         {cards_html}
         <a class="btn btn-secondary" href="/suggest-snack">Refresh Suggestions</a>
+
+        <script>
+        function toggleMissing(idx) {{
+            var panel = document.getElementById('missing-panel-' + idx);
+            if (!panel) return;
+            panel.style.display = (panel.style.display === 'none' || !panel.style.display) ? 'block' : 'none';
+        }}
+        </script>
         """
         return page("Suggest a Snack", body)
     finally:
         db.close()
+
+
+@app.route("/suggest-snack/reject-ingredients", methods=["POST"])
+@login_required
+def reject_ingredients_route():
+    """Save checked ingredients as RejectedIngredient rows and regenerate suggestions."""
+    items = [i.strip().lower() for i in request.form.getlist("ingredient") if i.strip()]
+    if items:
+        db = get_session()
+        try:
+            for name in items:
+                db.add(RejectedIngredient(name=name))
+            db.commit()
+        finally:
+            db.close()
+    return redirect(url_for("suggest_snack_page"))
+
+
+@app.route("/suggest-snack/skip", methods=["POST"])
+@login_required
+def skip_snack_route():
+    """Save the full snack name as a RejectedSnack row and regenerate suggestions."""
+    name = (request.form.get("name") or "").strip()
+    if name:
+        db = get_session()
+        try:
+            db.add(RejectedSnack(name=name))
+            db.commit()
+        finally:
+            db.close()
+    return redirect(url_for("suggest_snack_page"))
 
 
 @app.route("/suggest-snack/refine", methods=["POST"])

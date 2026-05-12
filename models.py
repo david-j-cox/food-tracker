@@ -131,6 +131,30 @@ class PendingNudge(Base):
     sent = Column(Integer, nullable=False, default=0)  # 0=pending, 1=sent
 
 
+class RejectedSnack(Base):
+    """Snack suggestions the user explicitly skipped ('not in the mood').
+
+    Used to steer Suggest-a-Snack away from repeats over a rolling window.
+    """
+    __tablename__ = "rejected_snacks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(Text, nullable=False)
+    rejected_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class RejectedIngredient(Base):
+    """Ingredients the user marked as not currently available.
+
+    Used to steer Suggest-a-Snack away from snacks needing these items.
+    """
+    __tablename__ = "rejected_ingredients"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(Text, nullable=False)
+    rejected_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 # ---------------------------------------------------------------------------
 # Engine & session setup
 # ---------------------------------------------------------------------------

@@ -297,13 +297,23 @@ Return ONLY the JSON object, no other text.""",
     return json.loads(text)
 
 
-def suggest_snack(current_totals: dict, daily_targets: dict) -> list[dict]:
+def suggest_snack(
+    current_totals: dict,
+    daily_targets: dict,
+    recent_rejected_snacks: list[str] | None = None,
+    recent_rejected_ingredients: list[str] | None = None,
+) -> list[dict]:
     """Suggest snacks to fill nutrient gaps without overshooting.
 
     Returns list of dicts, each with:
         name: str - snack name
         reason: str - which gaps it fills
+        ingredients: list[str] - simple ingredient names (no quantities)
         estimated_nutrients: dict - rough nutrient values
+
+    recent_rejected_snacks / recent_rejected_ingredients steer the model
+    away from snacks the user has just skipped or that need items they
+    don't currently have on hand.
     """
     gaps = {}
     for nutrient, target in daily_targets.items():
@@ -313,6 +323,20 @@ def suggest_snack(current_totals: dict, daily_targets: dict) -> list[dict]:
         gaps[nutrient] = {"current": round(current, 1), "target": target,
                           "remaining": round(remaining, 1),
                           "pct_remaining": round(pct_remaining, 1)}
+
+    rejection_block = ""
+    if recent_rejected_snacks:
+        rejection_block += (
+            "\n\nThe user has recently skipped these specific snacks — do NOT "
+            "suggest them again or close variants:\n"
+            + "\n".join(f"- {s}" for s in recent_rejected_snacks)
+        )
+    if recent_rejected_ingredients:
+        rejection_block += (
+            "\n\nThe user does NOT currently have these ingredients on hand — "
+            "do NOT suggest snacks that require any of them:\n"
+            + "\n".join(f"- {i}" for i in recent_rejected_ingredients)
+        )
 
     message = client.messages.create(
         model=MODEL,
@@ -330,12 +354,13 @@ For each snack, consider:
 - Prioritize nutrients where pct_remaining is highest (most under-consumed)
 - Avoid suggesting snacks heavy in nutrients where remaining is negative or near zero
 - Keep snacks reasonable in size (100-400 calories)
-- Suggest specific, concrete foods (e.g. "1 cup Greek yogurt with 1 tbsp pumpkin seeds" not just "yogurt")
+- Suggest specific, concrete foods (e.g. "1 cup Greek yogurt with 1 tbsp pumpkin seeds" not just "yogurt"){rejection_block}
 
 Return a JSON array with exactly 3 objects, each with these keys:
 {{
   "name": "specific snack description",
   "reason": "1-2 sentences explaining which key gaps this fills",
+  "ingredients": ["short ingredient name without quantity", "..."],
   "estimated_nutrients": {{
     "calories": number,
     "fat": number,
@@ -350,6 +375,8 @@ Return a JSON array with exactly 3 objects, each with these keys:
     "vitamin_d": number
   }}
 }}
+
+For "ingredients": list each distinct food item in the snack as a short, lowercase phrase WITHOUT quantities or prep details. Examples: "greek yogurt", "pumpkin seeds", "blueberries", "whole grain toast", "peanut butter". Aim for 1-5 entries per snack.
 
 Return ONLY the JSON array, no other text.""",
             }
